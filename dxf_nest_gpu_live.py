@@ -50,6 +50,7 @@ MIN_SPACING_PIXELS = 4
 
 # Live UI / server
 UI_FILENAME = "nest_viewer.html"
+HTTP_HOST   = "127.0.0.1"
 HTTP_PORT   = 0  # 0 = auto-pick a free port
 # ========================================================================
 
@@ -68,6 +69,41 @@ if not BITMAP_EVAL_WORKERS:
     BITMAP_EVAL_WORKERS = max(1, cpu_count)
 
 IS_WINDOWS = (os.name == "nt")
+
+# Runtime toggles exposed in the HTML UI (key, label, global attr, description)
+_UI_TOGGLE_DEFS = [
+    ("allow_mirror", "Allow mirror / flip parts", "ALLOW_MIRROR", "Permit mirrored copies when searching poses."),
+    ("allow_rotate_90", "Allow automatic 90° rotations", "ALLOW_ROTATE_90", "Include a 90° rotation candidate."),
+    ("use_obb", "Use OBB seeding", "USE_OBB_CANDIDATE", "Seed placement with oriented bounding box pose."),
+    ("allow_holes", "Allow nesting inside holes", "ALLOW_NEST_IN_HOLES", "Permit parts to be placed within other part holes."),
+    ("fallback_bbox", "Fallback open profiles to bounding boxes", "FALLBACK_OPEN_AS_BBOX", "Treat open DXF profiles as rectangles."),
+    ("group_by_thickness", "Group by thickness labels", "GROUP_BY_THICKNESS", "Nest files grouped by detected thickness."),
+    ("split_sheets", "Split sheets into separate DXFs", "SPLIT_SHEETS", "Write one DXF per finished sheet."),
+    ("merge_lines", "Merge touching lines", "MERGE_LINES", "Combine collinear edges for shared cutting."),
+]
+
+
+def _ui_toggle_snapshot():
+    snap = []
+    g = globals()
+    for key, label, attr, desc in _UI_TOGGLE_DEFS:
+        snap.append({
+            "key": key,
+            "label": label,
+            "value": bool(g.get(attr)),
+            "description": desc,
+        })
+    return snap
+
+
+def _apply_toggle_config(cfg: Dict[str, Any]):
+    if not isinstance(cfg, dict):
+        return
+    g = globals()
+    for key, _label, attr, _desc in _UI_TOGGLE_DEFS:
+        if key in cfg:
+            g[attr] = bool(cfg[key])
+
 
 # ---------- Tiny Win progress window (optional) ----------
 if IS_WINDOWS:
@@ -793,12 +829,31 @@ class NestControl:
         self.stop  = threading.Event()
         self.status_lock = threading.Lock()
         self.status = {"phase":"idle"}
+        self._start_lock = threading.Lock()
+        self._start_event = threading.Event()
+        self._start_payload: Dict[str, Any] = {}
+        self._started = False
     def set_status(self, **kv):
         with self.status_lock:
             self.status.update(kv)
     def get_status(self):
         with self.status_lock:
             return dict(self.status)
+    def request_start(self, payload: Dict[str, Any]):
+        with self._start_lock:
+            if self._started:
+                return False
+            self._start_payload = dict(payload or {})
+            self._started = True
+        self.stop.clear()
+        self.pause.clear()
+        self.set_status(phase="starting")
+        self._start_event.set()
+        return True
+    def wait_for_start(self) -> Dict[str, Any]:
+        self._start_event.wait()
+        with self._start_lock:
+            return dict(self._start_payload)
 
 class SSEHub:
     def __init__(self): self._clients=[]; self._lock=threading.Lock()
@@ -838,6 +893,7 @@ def write_standalone_html(path_on_disk: str):
   button {{ background:#1b2735; color:var(--fg); border:1px solid #2b3b52; border-radius:10px; padding:8px 12px; cursor:pointer; }}
   button:hover {{ border-color:#3f5b7a; }}
   button:active {{ transform: translateY(1px); }}
+  button[disabled] {{ opacity:0.5; cursor:not-allowed; }}
   button.danger {{ border-color:var(--danger); color:var(--danger); }}
   button.accent {{ border-color:var(--accent); color:var(--accent); }}
   main {{ display:grid; grid-template-columns: 320px 1fr; min-height: calc(100% - 60px); }}
@@ -855,6 +911,9 @@ def write_standalone_html(path_on_disk: str):
   .pill {{ font-size:12px; padding:2px 8px; border:1px solid #2b3b52; border-radius:999px; }}
   .ok {{ border-color:var(--accent); color:var(--accent); }}
   .warn {{ border-color:var(--warn); color:var(--warn); }}
+  #optionsWrap {{ display:flex; flex-direction:column; gap:6px; margin:8px 0 10px; }}
+  .optCheck {{ display:flex; align-items:center; gap:8px; font-size:13px; }}
+  .optCheck input {{ width:16px; height:16px; }}
 </style>
 </head>
 <body>
@@ -870,6 +929,12 @@ def write_standalone_html(path_on_disk: str):
 </header>
 <main>
   <aside>
+    <div class="row" id="configPanel">
+      <div class="label">Run setup</div>
+      <div class="small" id="configMsg">Loading options…</div>
+      <div id="optionsWrap"></div>
+      <button id="startBtn" class="accent" disabled>Start Nesting</button>
+    </div>
     <div class="row">
       <div class="label">Progress</div>
       <div id="progress"><div id="bar"></div></div>
@@ -902,11 +967,112 @@ const ctx = cv.getContext('2d');
 let W=48, H=96, M=0.5, scale=1;
 let currentSheet = 0;
 let total = 0, placed = 0;
-let gpu = "—";
+const pauseBtn = document.getElementById('pauseBtn');
+const resumeBtn = document.getElementById('resumeBtn');
+const stopBtn = document.getElementById('stopBtn');
+const startBtn = document.getElementById('startBtn');
+const optionsWrap = document.getElementById('optionsWrap');
+const configMsg = document.getElementById('configMsg');
 const sheetSel = document.getElementById('sheetSelect');
+
+let runStarted = false;
+let startRequested = false;
 
 // Maintain sheet → paths in a Map
 let sheets = new Map(); // sheetIndex -> {{paths: [ [ [x,y],... ] ], bbox:[W,H], margin:M}}
+
+function setRunState(active) {{
+  runStarted = active;
+  [pauseBtn, resumeBtn, stopBtn].forEach(btn => {{ if (btn) btn.disabled = !active; }});
+  optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = active; }});
+  if (active) {{
+    startBtn.disabled = true;
+    startBtn.textContent = 'Running…';
+  }}
+}}
+
+function renderOptions(opts) {{
+  optionsWrap.innerHTML = '';
+  if (!Array.isArray(opts) || opts.length === 0) {{
+    const msg = document.createElement('div');
+    msg.className = 'small';
+    msg.textContent = 'No runtime toggles exposed.';
+    optionsWrap.appendChild(msg);
+    return;
+  }}
+  for (const opt of opts) {{
+    const id = `opt_${{opt.key}}`;
+    const label = document.createElement('label');
+    label.className = 'optCheck';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = id;
+    cb.dataset.key = opt.key;
+    cb.checked = !!opt.value;
+    cb.disabled = runStarted || startRequested;
+    const span = document.createElement('span');
+    span.textContent = opt.label;
+    if (opt.description) span.title = opt.description;
+    label.appendChild(cb);
+    label.appendChild(span);
+    optionsWrap.appendChild(label);
+  }}
+}}
+
+async function fetchConfig() {{
+  try {{
+    const resp = await fetch('/config');
+    if (!resp.ok) throw new Error('HTTP '+resp.status);
+    const data = await resp.json();
+    if (Array.isArray(data.options)) renderOptions(data.options);
+    const phase = data.status && data.status.phase;
+    if (!runStarted && (phase === 'waiting' || phase === 'idle')) {{
+      configMsg.textContent = 'Adjust options then press Start.';
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start Nesting';
+    }}
+  }} catch (err) {{
+    configMsg.textContent = 'Failed to load options.';
+  }}
+}}
+
+startBtn.addEventListener('click', async () => {{
+  if (runStarted) return;
+  const payload = {{}};
+  optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{
+    payload[cb.dataset.key] = cb.checked;
+  }});
+  startRequested = true;
+  optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = true; }});
+  startBtn.disabled = true;
+  startBtn.textContent = 'Starting…';
+  configMsg.textContent = 'Submitting…';
+  try {{
+    const res = await fetch('/control?cmd=start', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload)
+    }});
+    if (!res.ok) {{
+      const text = await res.text();
+      throw new Error(text || ('HTTP '+res.status));
+    }}
+    configMsg.textContent = 'Waiting for backend…';
+  }} catch (err) {{
+    startRequested = false;
+    optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = false; }});
+    startBtn.disabled = false;
+    startBtn.textContent = 'Start Nesting';
+    configMsg.textContent = 'Start failed: '+err.message;
+  }}
+}});
+
+pauseBtn.onclick = () => fetch('/control?cmd=pause', {{method:'POST'}});
+resumeBtn.onclick = () => fetch('/control?cmd=resume', {{method:'POST'}});
+stopBtn.onclick = () => fetch('/control?cmd=stop', {{method:'POST'}});
+
+setRunState(false);
+fetchConfig();
 
 function fitScale() {{
   const pad = 20;
@@ -970,14 +1136,34 @@ function setGPU(ok) {{
 function setGroup(g) {{ const el=document.getElementById('groupPill'); el.textContent='Group: '+(g||'—'); }}
 function setSheetPill(cur, total) {{ const el=document.getElementById('sheetPill'); el.textContent='Sheet: '+(cur+1)+' / '+(total||'—'); }}
 
-document.getElementById('pauseBtn').onclick = ()=> fetch('/control?cmd=pause', {{method:'POST'}});
-document.getElementById('resumeBtn').onclick= ()=> fetch('/control?cmd=resume',{{method:'POST'}});
-document.getElementById('stopBtn').onclick  = ()=> fetch('/control?cmd=stop',  {{method:'POST'}});
-
 const es = new EventSource('/events');
 es.onmessage = (ev) => {{
   try {{
     const msg = JSON.parse(ev.data||'{{}}');
+    if (msg.type==='waiting') {{
+      setRunState(false);
+      startRequested = false;
+      if (Array.isArray(msg.options)) renderOptions(msg.options);
+      const text = msg.message || 'Waiting for Start…';
+      configMsg.textContent = text;
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start Nesting';
+      setStatus(text);
+      return;
+    }}
+    if (msg.type==='starting') {{
+      startRequested = true;
+      optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = true; }});
+      configMsg.textContent = 'Starting…';
+      startBtn.disabled = true;
+      startBtn.textContent = 'Starting…';
+      setStatus('Starting…');
+      return;
+    }}
+    if (msg.type==='options_applied') {{
+      if (Array.isArray(msg.options)) renderOptions(msg.options);
+      return;
+    }}
     if (msg.type==='hello') {{
       setGPU(!!msg.cuda);
       return;
@@ -986,6 +1172,8 @@ es.onmessage = (ev) => {{
       W=msg.sheet_w; H=msg.sheet_h; M=msg.margin; setGroup(msg.group||'—'); setStatus('Starting…');
       sheets.clear(); sheetSel.innerHTML=''; currentSheet=0; setProgress(0,msg.total_parts||0); redraw();
       // show first sheet slot immediately
+      setRunState(true);
+      configMsg.textContent = 'Run in progress…';
       ensureSheet(0); setSheetPill(0, 1); redraw();
       return;
     }}
@@ -1015,6 +1203,9 @@ es.onmessage = (ev) => {{
     }}
     if (msg.type==='done' || msg.type==='stopped') {{
       setStatus(msg.type==='done' ? 'Completed.' : 'Stopped — partial saved.');
+      setRunState(false);
+      startBtn.disabled = true;
+      configMsg.textContent = msg.type==='done' ? 'Completed.' : 'Stopped — partial saved.';
       if (msg.outputs) {{
         document.getElementById('outputs').textContent = (msg.outputs||[]).map(o=>o[0]+'  (sheets:'+o[1]+')').join('\\n') || '—';
       }}
@@ -1079,6 +1270,10 @@ class NestHTTPHandler(BaseHTTPRequestHandler):
             st = self.control.get_status()
             self._set_headers(200, "application/json"); self.wfile.write(json.dumps(st).encode("utf-8")); return
 
+        if p.path == "/config":
+            payload = {"options": _ui_toggle_snapshot(), "status": self.control.get_status()}
+            self._set_headers(200, "application/json"); self.wfile.write(json.dumps(payload).encode("utf-8")); return
+
         self._set_headers(404, "text/plain"); self.wfile.write(b"Not found")
 
     def do_POST(self):
@@ -1092,10 +1287,28 @@ class NestHTTPHandler(BaseHTTPRequestHandler):
                 self.control.pause.clear(); self._set_headers(200,"text/plain"); self.wfile.write(b"OK"); return
             if cmd == "stop":
                 self.control.stop.set();  self._set_headers(200,"text/plain"); self.wfile.write(b"OK"); return
+            if cmd == "start":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except Exception:
+                    length = 0
+                raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+                try:
+                    payload = json.loads(raw) if raw.strip() else {}
+                except json.JSONDecodeError:
+                    self._set_headers(400, "text/plain"); self.wfile.write(b"Invalid JSON"); return
+                if not isinstance(payload, dict):
+                    self._set_headers(400, "text/plain"); self.wfile.write(b"JSON body must be an object"); return
+                if not self.control.request_start(payload):
+                    self._set_headers(409, "text/plain"); self.wfile.write(b"Already started"); return
+                self._set_headers(200, "application/json"); self.wfile.write(json.dumps({"status":"starting"}).encode("utf-8"))
+                self.hub.broadcast("starting", {"options": payload})
+                return
             self._set_headers(400,"text/plain"); self.wfile.write(b"Bad command"); return
         self._set_headers(404,"text/plain"); self.wfile.write(b"Not found")
 
-def start_http_server(folder:str, ui_filename:str, cuda_on:bool, control:NestControl, hub:SSEHub, port:int=0):
+def start_http_server(folder:str, ui_filename:str, cuda_on:bool, control:NestControl, hub:SSEHub,
+                      port:int=0, host:str="127.0.0.1"):
     ui_path = os.path.join(folder, ui_filename)
     write_standalone_html(ui_path)
 
@@ -1105,11 +1318,11 @@ def start_http_server(folder:str, ui_filename:str, cuda_on:bool, control:NestCon
     NestHTTPHandler.folder = folder
     NestHTTPHandler.ui_path = ui_path
     NestHTTPHandler.cuda_on = cuda_on
-    srv = _Server(("127.0.0.1", port), NestHTTPHandler)
-    host, real_port = srv.server_address
+    srv = _Server((host, port), NestHTTPHandler)
+    host_bound, real_port = srv.server_address
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
-    return srv, real_port
+    return srv, host_bound, real_port
 
 # ---------- placement (with live events + pause/stop checks) ----------
 def bl_place(occ, mask_segments, pw):
@@ -1571,11 +1784,20 @@ def main_live():
         else: accel_note=f"Acceleration: PyTorch device {dev}"
 
     # start HTTP server + open viewer
-    srv, port = start_http_server(FOLDER, UI_FILENAME, using_cuda, control, hub, HTTP_PORT)
-    url=f"http://127.0.0.1:{port}/"
+    srv, bound_host, port = start_http_server(FOLDER, UI_FILENAME, using_cuda, control, hub, HTTP_PORT, HTTP_HOST)
+    open_host = "127.0.0.1" if bound_host in ("0.0.0.0", "::", "") else bound_host
+    url=f"http://{open_host}:{port}/"
     try: webbrowser.open(url)
     except: pass
-    log(f"[INFO] Live viewer at: {url}")
+    if bound_host != open_host:
+        log(f"[INFO] Live viewer at: {url} (server bound to {bound_host})")
+    else:
+        log(f"[INFO] Live viewer at: {url}")
+
+    wait_text = "Viewer ready — adjust options in the browser and press Start."
+    control.set_status(phase="waiting")
+    hub.broadcast("waiting", {"message": wait_text, "options": _ui_toggle_snapshot()})
+    prog.update(wait_text)
 
     # status helpers
     def progress_cb(text: str):
@@ -1588,10 +1810,20 @@ def main_live():
         elif kind=="sheet_opened":
             hub.broadcast("sheet_opened", payload)
 
-    # parse all parts + groups
-    all_parts=[]; groups={}; skipped=0
+    # Wait for the UI to kick off the run
+    start_config = control.wait_for_start()
+    _apply_toggle_config(start_config)
+    applied_opts = _ui_toggle_snapshot()
+    hub.broadcast("options_applied", {"options": applied_opts})
+    for opt in applied_opts:
+        log(f"[INFO] {opt['label']}: {'ON' if opt['value'] else 'OFF'}")
+
+    control.set_status(phase="reading")
     hub.broadcast("progress", {"text":"Reading DXFs…"})
     prog.update(f"Reading DXFs… 0/{len(dxf_files)}")
+
+    # parse all parts + groups
+    all_parts=[]; groups={}; skipped=0
     for idx,fn in enumerate(dxf_files,1):
         prog.update(f"Reading DXFs… {idx}/{len(dxf_files)}  {fn}")
         path=os.path.join(FOLDER,fn)
@@ -1614,7 +1846,11 @@ def main_live():
             all_parts.append(p); groups.setdefault(thk_label,[]).append(p)
 
     if not all_parts:
-        log("[WARN] Nothing to nest."); prog.update("Nothing to nest."); prog.close(); return
+        log("[WARN] Nothing to nest.")
+        hub.broadcast("progress", {"text":"Nothing to nest."})
+        control.set_status(phase="done")
+        hub.broadcast("done", {"outputs": []})
+        prog.update("Nothing to nest."); prog.close(); return
 
     outputs=[]
     hub.broadcast("hello", {"cuda": using_cuda})
@@ -1647,6 +1883,7 @@ def main_live():
                     write_r12_dxf(out, sheets, W_eff, H_eff, placements, SHEET_MARGIN, merge_lines=MERGE_LINES)
                     outputs.append((out, sheets))
                 hub.broadcast("stopped", {"outputs": outputs})
+                control.set_status(phase="stopped")
                 return False  # stopped
         else:
             try:
@@ -1662,6 +1899,7 @@ def main_live():
                     write_r12_dxf(out, sheets, W_eff, H_eff, placements, SHEET_MARGIN, merge_lines=MERGE_LINES)
                     outputs.append((out, sheets))
                 hub.broadcast("stopped", {"outputs": outputs})
+                control.set_status(phase="stopped")
                 return False
 
         if sheets<=0:
@@ -1708,6 +1946,7 @@ def main_live():
     except Exception as e:
         print(f"[WARN] Could not write report: {e}")
 
+    control.set_status(phase="done")
     hub.broadcast("done", {"outputs": outputs})
     prog.update("Done. You can close this window."); prog.close()
 
@@ -1750,6 +1989,7 @@ if __name__ == "__main__":
     parser.add_argument("--rotation-step-deg", type=float, default=ROTATION_STEP_DEG)
     parser.add_argument("--insunits", choices=["in","mm"], default=("in" if INSUNITS==1 else "mm"))
     parser.add_argument("--port", type=int, default=HTTP_PORT, help="HTTP port for the viewer (0=auto).")
+    parser.add_argument("--host", default=HTTP_HOST, help="Host/interface for the viewer server (default 127.0.0.1).")
     parser.add_argument("--pause-on-exit", dest="pause_on_exit", action="store_true", default=False)
     args = parser.parse_args()
 
@@ -1768,6 +2008,7 @@ if __name__ == "__main__":
     ROTATION_STEP_DEG=max(0.0, float(args.rotation_step_deg))
     INSUNITS = 1 if args.insunits=="in" else 4
     HTTP_PORT = int(args.port)
+    HTTP_HOST = args.host
 
     try:
         main_live()
