@@ -692,6 +692,28 @@ class Part:
 # ---------- Raster helpers ----------
 def _empty_mask(w:int, h:int): return [bytearray(w) for _ in range(h)]
 
+def _mask_segments_and_fills(mask):
+    segments=[]; fills=[]
+    for row in mask:
+        row_segments=[]; row_fills=[]
+        start=-1
+        row_len=len(row)
+        for idx,val in enumerate(row):
+            if val:
+                if start==-1:
+                    start=idx
+            elif start!=-1:
+                if idx>start:
+                    row_segments.append((start, idx))
+                    row_fills.append(b"\x01"*(idx-start))
+                start=-1
+        if start!=-1 and row_len>start:
+            row_segments.append((start, row_len))
+            row_fills.append(b"\x01"*(row_len-start))
+        segments.append(row_segments)
+        fills.append(row_fills)
+    return segments, fills
+
 def rasterize_polygon_to_mask(mask, w, h, pts_scaled):
     if not pts_scaled: return
     ys=[p[1] for p in pts_scaled]
@@ -1090,26 +1112,38 @@ def start_http_server(folder:str, ui_filename:str, cuda_on:bool, control:NestCon
     return srv, real_port
 
 # ---------- placement (with live events + pause/stop checks) ----------
-def bl_place(occ, part_mask):
+def bl_place(occ, mask_segments, pw):
     H=len(occ); W=len(occ[0]) if H>0 else 0
-    ph=len(part_mask); pw=len(part_mask[0]) if ph>0 else 0
-    for y in range(0, H - ph + 1):
-        for x in range(0, W - pw + 1):
-            any_hit=False
-            for yy in range(ph):
-                row_p=part_mask[yy]; row_o=occ[y+yy]
-                for xx in range(pw):
-                    if row_p[xx] and row_o[x+xx]: any_hit=True; break
-                if any_hit: break
-            if not any_hit: return (x,y)
+    ph=len(mask_segments)
+    if H < ph or W < pw:
+        return None
+    max_y = H - ph + 1
+    max_x = W - pw + 1
+    for y in range(max_y):
+        rows = occ[y:y+ph]
+        for x in range(max_x):
+            blocked=False
+            for yy,segs in enumerate(mask_segments):
+                if not segs: continue
+                row=rows[yy]
+                for start,end in segs:
+                    if row.find(1, x+start, x+end) != -1:
+                        blocked=True; break
+                if blocked: break
+            if not blocked:
+                return (x,y)
     return None
 
-def or_mask_inplace(occ, part_mask, ox, oy):
-    ph=len(part_mask); pw=len(part_mask[0]) if ph>0 else 0
-    for y in range(ph):
-        row_p=part_mask[y]; row_o=occ[oy+y]
-        for x in range(pw):
-            if row_p[x]: row_o[ox+x]=1
+def or_mask_inplace(occ, mask_segments, mask_fills, ox, oy):
+    for y,segs in enumerate(mask_segments):
+        if not segs: continue
+        row=occ[oy+y]
+        fills=mask_fills[y]
+        for (start,end),fill in zip(segs,fills):
+            if not fill:
+                continue
+            dst_start=ox+start
+            row[dst_start:dst_start + (end-start)] = fill
 
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                      progress=None, progress_total=None, progress_prefix="",
@@ -1152,7 +1186,22 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                 base = raw if ALLOW_NEST_IN_HOLES else outer
                 test=dilate_mask(base,pw,ph,r_px+SAFETY_PX)
                 occ_pad=dilate_mask(base,pw,ph,SAFETY_PX)
-                p._cand_cache[key] = {'loops':loops,'raw':raw,'occ':occ_pad,'test':test,'pw':pw,'ph':ph}
+                test_segments,_=_mask_segments_and_fills(test)
+                raw_segments,raw_fills=_mask_segments_and_fills(raw)
+                occ_segments,occ_fills=_mask_segments_and_fills(occ_pad)
+                p._cand_cache[key] = {
+                    'loops':loops,
+                    'raw':raw,
+                    'occ':occ_pad,
+                    'test':test,
+                    'pw':pw,
+                    'ph':ph,
+                    'test_segments':test_segments,
+                    'raw_segments':raw_segments,
+                    'raw_fills':raw_fills,
+                    'occ_segments':occ_segments,
+                    'occ_fills':occ_fills
+                }
             cand=p._cand_cache[key]
             if mask_ops:
                 if 'test_tensor' not in cand: cand['test_tensor']=mask_ops.mask_to_tensor(cand['test'])
@@ -1163,15 +1212,15 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                 check_ctrl()
                 occ_raw,occ_safe,outlist=ensure_sheet()
                 pos = (mask_ops.find_first_fit(occ_safe, cand['test_tensor']) if mask_ops
-                       else bl_place(occ_safe, cand['test']))
+                       else bl_place(occ_safe, cand['test_segments'], cand['pw']))
                 if pos is not None:
                     xpx,ypx=pos
                     if mask_ops:
                         mask_ops.or_mask(occ_raw, cand['raw_tensor'], xpx, ypx)
                         mask_ops.or_mask(occ_safe,cand['occ_tensor'], xpx, ypx)
                     else:
-                        or_mask_inplace(occ_raw, cand['raw'], xpx, ypx)
-                        or_mask_inplace(occ_safe,cand['occ'], xpx, ypx)
+                        or_mask_inplace(occ_raw, cand['raw_segments'], cand['raw_fills'], xpx, ypx)
+                        or_mask_inplace(occ_safe,cand['occ_segments'], cand['occ_fills'], xpx, ypx)
                     x_units=xpx/scale; y_units=ypx/scale
                     loops_t=[[ (x+x_units,y+y_units) for (x,y) in lp ] for lp in cand['loops']]
                     outlist.append({'sheet':sheets_count,'loops':loops_t})
@@ -1202,7 +1251,22 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                 base=raw if ALLOW_NEST_IN_HOLES else outer
                 test=dilate_mask(base,pw,ph,r_px+SAFETY_PX)
                 occ_pad=dilate_mask(base,pw,ph,SAFETY_PX)
-                p._cand_cache[key] = {'loops':loops,'raw':raw,'occ':occ_pad,'test':test,'pw':pw,'ph':ph}
+                test_segments,_=_mask_segments_and_fills(test)
+                raw_segments,raw_fills=_mask_segments_and_fills(raw)
+                occ_segments,occ_fills=_mask_segments_and_fills(occ_pad)
+                p._cand_cache[key] = {
+                    'loops':loops,
+                    'raw':raw,
+                    'occ':occ_pad,
+                    'test':test,
+                    'pw':pw,
+                    'ph':ph,
+                    'test_segments':test_segments,
+                    'raw_segments':raw_segments,
+                    'raw_fills':raw_fills,
+                    'occ_segments':occ_segments,
+                    'occ_fills':occ_fills
+                }
             cand=p._cand_cache[key]
             if mask_ops:
                 if 'raw_tensor' not in cand: cand['raw_tensor']=mask_ops.mask_to_tensor(cand['raw'])
@@ -1210,8 +1274,8 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                 mask_ops.or_mask(occ_raw,cand['raw_tensor'],0,0)
                 mask_ops.or_mask(occ_safe,cand['occ_tensor'],0,0)
             else:
-                or_mask_inplace(occ_raw,cand['raw'],0,0)
-                or_mask_inplace(occ_safe,cand['occ'],0,0)
+                or_mask_inplace(occ_raw,cand['raw_segments'],cand['raw_fills'],0,0)
+                or_mask_inplace(occ_safe,cand['occ_segments'],cand['occ_fills'],0,0)
             outlist.append({'sheet':sheets_count,'loops':p._cand_cache[key]['loops']})
             placed_count+=1
             if event_sink:
