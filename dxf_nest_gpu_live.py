@@ -2,7 +2,7 @@
 # dxf_nest_gpu_live.py — Live HTML viewer + SSE controls (pause/resume/stop), optional CUDA/NumPy
 # - GPU accel via PyTorch when available; fast CPU fallback via NumPy if found; else pure Python
 # - Thickness grouping by filename prefix "<thickness><unit>-*.dxf" (e.g., 0.5in-*, 12mm-*)
-# - Guaranteed spacing with 1–2 px safety; no shared-line cutting unless enabled
+# - Guaranteed spacing via geometric offsets (pyclipper) with pixel fallback; no shared-line cutting unless enabled
 # - Output: per-thickness nested .dxf; optional split per sheet
 # - Standalone HTML UI written to the folder; opens automatically; Pause/Resume/Stop & Save
 
@@ -17,6 +17,13 @@ SHEET_GAP = 2.0
 SPACING  = 0.125          # gap between parts (drawing units)
 JOIN_TOL = 0.005
 ARC_CHORD_TOL = 0.01
+
+# Spacing accuracy controls
+SPACING_ABS_TOL = 1e-4     # absolute tolerance (drawing units)
+SPACING_REL_TOL = 0.01     # relative tolerance (fraction of spacing)
+
+# Safety halo applied around each rasterized part (drawing units)
+SAFETY_GAP = 0.01
 
 FALLBACK_OPEN_AS_BBOX = True
 
@@ -48,6 +55,13 @@ ROTATION_STEP_DEG = 0.0
 SAFETY_PX = 2
 MIN_SPACING_PIXELS = 4
 
+CLIPPER_SCALE = 1_000_000.0
+CLIPPER_ARC_TOL = 0.001
+CLIPPER_MITER = 4.0
+MAX_AUTO_SCALE = 8192
+
+_PRECISION_WARNING_EMITTED = False
+
 # Live UI / server
 UI_FILENAME = "nest_viewer.html"
 HTTP_HOST   = "127.0.0.1"
@@ -58,6 +72,13 @@ import os, math, re, sys, json, time, webbrowser, threading, traceback, datetime
 from typing import List, Tuple, Dict, Optional, Any
 from random import Random
 from urllib.parse import urlparse, parse_qs
+
+try:
+    import pyclipper
+except Exception:  # optional dependency for precise offsets
+    pyclipper = None
+
+PRECISION_OFFSETS_AVAILABLE = pyclipper is not None
 
 # Fallback sample folder shipped with script
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
@@ -135,6 +156,33 @@ _UI_FIELD_DEFS = [
         "type": "number",
         "min": 0.0,
         "step": 0.01,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "safety_gap",
+        "label": "Safety halo",
+        "attr": "SAFETY_GAP",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.001,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "spacing_abs_tol",
+        "label": "Spacing abs tol",
+        "attr": "SPACING_ABS_TOL",
+        "type": "number",
+        "min": 1e-9,
+        "step": 1e-5,
+        "parser": lambda raw: max(1e-9, float(raw)),
+    },
+    {
+        "key": "spacing_rel_tol",
+        "label": "Spacing rel tol",
+        "attr": "SPACING_REL_TOL",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.001,
         "parser": lambda raw: max(0.0, float(raw)),
     },
     {
@@ -452,6 +500,12 @@ _report_lines: List[str] = []
 def log(line: str):
     print(line)
     _report_lines.append(line)
+
+def _warn_precise_offsets_fallback():
+    global _PRECISION_WARNING_EMITTED
+    if not PRECISION_OFFSETS_AVAILABLE and not _PRECISION_WARNING_EMITTED:
+        log("[WARN] pyclipper not available — spacing accuracy falls back to pixel dilation.")
+        _PRECISION_WARNING_EMITTED = True
 
 Point = Tuple[float,float]
 Loop  = List[Point]
@@ -875,6 +929,60 @@ def rotate_loop(loop: Loop, theta: float) -> Loop:
     minx=min(x for x,_ in rot); miny=min(y for _,y in rot)
     return [(x-minx,y-miny) for x,y in rot]
 
+def _ensure_closed(loop: Loop) -> Loop:
+    if not loop:
+        return []
+    if loop[0] != loop[-1]:
+        return list(loop) + [loop[0]]
+    return list(loop)
+
+def _ensure_orientation(loop: Loop, ccw: bool) -> Loop:
+    if len(loop) < 3:
+        return list(loop)
+    area = polygon_area(_ensure_closed(loop))
+    if ccw and area < 0:
+        return list(reversed(loop))
+    if not ccw and area > 0:
+        return list(reversed(loop))
+    return list(loop)
+
+def _offset_loops_precise(loops: List[Loop], delta: float) -> Optional[List[Loop]]:
+    if delta == 0 or not loops:
+        return [list(lp) for lp in loops]
+    if pyclipper is None:
+        return None
+    co = pyclipper.PyclipperOffset(miterLimit=CLIPPER_MITER,
+                                   arcTolerance=CLIPPER_ARC_TOL * CLIPPER_SCALE)
+    added = False
+    for idx, lp in enumerate(loops):
+        if len(lp) < 3:
+            continue
+        want_ccw = (idx == 0)
+        oriented = _ensure_orientation(lp, want_ccw)
+        closed = _ensure_closed(oriented)
+        path = [(int(round(x * CLIPPER_SCALE)), int(round(y * CLIPPER_SCALE)))
+                for x, y in closed]
+        if len(path) < 3:
+            continue
+        co.AddPath(path, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+        added = True
+    if not added:
+        return None
+    result = co.Execute(delta * CLIPPER_SCALE)
+    if not result:
+        return []
+    loops_out = []
+    for path in result:
+        pts = [(x / CLIPPER_SCALE, y / CLIPPER_SCALE) for x, y in path]
+        pts = _ensure_closed(pts)
+        loops_out.append(pts)
+    loops_out.sort(key=lambda lp: abs(polygon_area(lp)), reverse=True)
+    if loops_out:
+        loops_out[0] = _ensure_orientation(loops_out[0], True)
+        for i in range(1, len(loops_out)):
+            loops_out[i] = _ensure_orientation(loops_out[i], False)
+    return loops_out
+
 def convex_hull(points: List[Tuple[float,float]]) -> List[Tuple[float,float]]:
     pts=sorted(set(points))
     if len(pts)<=1: return pts
@@ -1074,8 +1182,15 @@ def dilate_mask(mask,w,h,r):
     return out
 
 def _eff_scale(scale:int, spacing:float)->int:
-    if spacing<=0: return scale
-    return max(scale, int(math.ceil(MIN_SPACING_PIXELS/max(spacing,1e-9))))
+    target = max(1, scale)
+    feature = max(spacing, SAFETY_GAP, 1e-9)
+    tol = max(SPACING_ABS_TOL, feature * SPACING_REL_TOL)
+    target = max(target, int(math.ceil(1.0 / max(tol, 1e-9))))
+    if spacing > 0:
+        target = max(target, int(math.ceil(MIN_SPACING_PIXELS / max(spacing, 1e-9))))
+    if SAFETY_GAP > 0:
+        target = max(target, int(math.ceil(MIN_SPACING_PIXELS / max(SAFETY_GAP, 1e-9))))
+    return min(target, MAX_AUTO_SCALE)
 
 # ---------- Control / SSE Server ----------
 class NestAbortPartial(Exception):
@@ -1747,7 +1862,11 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                      control: Optional[NestControl] = None,
                      event_sink: Optional[callable] = None):
     Wpx=max(1,int(math.ceil(W*scale))); Hpx=max(1,int(math.ceil(H*scale)))
-    r_px=int(math.ceil(spacing*scale))
+    spacing_px=int(math.ceil(max(0.0, spacing)*scale))
+    safety_px = SAFETY_PX
+    if SAFETY_GAP > 0:
+        safety_px = max(safety_px, int(math.ceil(SAFETY_GAP * scale)))
+    safety_units = max(SAFETY_GAP, safety_px / float(scale))
     sheets_occ_raw=[]; sheets_occ_safe=[]; sheets_out=[]; sheets_count=0
     def ensure_sheet():
         nonlocal sheets_count
@@ -1777,11 +1896,26 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             key=(scale,ang,mirror)
             if key not in p._cand_cache:
                 w,h,loops=p.oriented(ang,mirror)
-                raw,pw,ph=rasterize_loops(loops,scale)
-                outer,_,_=rasterize_outer_only(loops,scale)
-                base = raw if ALLOW_NEST_IN_HOLES else outer
-                test=dilate_mask(base,pw,ph,r_px+SAFETY_PX)
-                occ_pad=dilate_mask(base,pw,ph,SAFETY_PX)
+                raw,raw_w,raw_h=rasterize_loops(loops,scale)
+                outer,outer_w,outer_h=rasterize_outer_only(loops,scale)
+                if ALLOW_NEST_IN_HOLES:
+                    base_loops = loops
+                    base_mask, base_w, base_h = raw, raw_w, raw_h
+                else:
+                    base_loops = [loops[0]] if loops else []
+                    base_mask, base_w, base_h = outer, outer_w, outer_h
+
+                precise_test = _offset_loops_precise(base_loops, max(0.0, spacing) + safety_units)
+                precise_occ = _offset_loops_precise(base_loops, safety_units)
+                if precise_test is not None and precise_occ is not None:
+                    test,test_w,test_h=rasterize_loops(precise_test, scale)
+                    occ_pad,occ_w,occ_h=rasterize_loops(precise_occ, scale)
+                else:
+                    _warn_precise_offsets_fallback()
+                    test=dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
+                    occ_pad=dilate_mask(base_mask, base_w, base_h, safety_px)
+                    test_w,test_h = base_w, base_h
+                    occ_w,occ_h = base_w, base_h
                 test_segments,_=_mask_segments_and_fills(test)
                 raw_segments,raw_fills=_mask_segments_and_fills(raw)
                 occ_segments,occ_fills=_mask_segments_and_fills(occ_pad)
@@ -1790,8 +1924,8 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     'raw':raw,
                     'occ':occ_pad,
                     'test':test,
-                    'pw':pw,
-                    'ph':ph,
+                    'pw':test_w,
+                    'ph':test_h,
                     'test_segments':test_segments,
                     'raw_segments':raw_segments,
                     'raw_fills':raw_fills,
@@ -1842,11 +1976,26 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             ang,mirror=0.0,False; key=(scale,ang,mirror)
             if key not in p._cand_cache:
                 w,h,loops=p.oriented(ang,mirror)
-                raw,pw,ph=rasterize_loops(loops,scale)
-                outer,_,_=rasterize_outer_only(loops,scale)
-                base=raw if ALLOW_NEST_IN_HOLES else outer
-                test=dilate_mask(base,pw,ph,r_px+SAFETY_PX)
-                occ_pad=dilate_mask(base,pw,ph,SAFETY_PX)
+                raw,raw_w,raw_h=rasterize_loops(loops,scale)
+                outer,outer_w,outer_h=rasterize_outer_only(loops,scale)
+                if ALLOW_NEST_IN_HOLES:
+                    base_loops = loops
+                    base_mask, base_w, base_h = raw, raw_w, raw_h
+                else:
+                    base_loops = [loops[0]] if loops else []
+                    base_mask, base_w, base_h = outer, outer_w, outer_h
+
+                precise_test = _offset_loops_precise(base_loops, max(0.0, spacing) + safety_units)
+                precise_occ = _offset_loops_precise(base_loops, safety_units)
+                if precise_test is not None and precise_occ is not None:
+                    test,test_w,test_h=rasterize_loops(precise_test, scale)
+                    occ_pad,occ_w,occ_h=rasterize_loops(precise_occ, scale)
+                else:
+                    _warn_precise_offsets_fallback()
+                    test=dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
+                    occ_pad=dilate_mask(base_mask, base_w, base_h, safety_px)
+                    test_w,test_h = base_w, base_h
+                    occ_w,occ_h = base_w, base_h
                 test_segments,_=_mask_segments_and_fills(test)
                 raw_segments,raw_fills=_mask_segments_and_fills(raw)
                 occ_segments,occ_fills=_mask_segments_and_fills(occ_pad)
@@ -1855,8 +2004,8 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     'raw':raw,
                     'occ':occ_pad,
                     'test':test,
-                    'pw':pw,
-                    'ph':ph,
+                    'pw':test_w,
+                    'ph':test_h,
                     'test_segments':test_segments,
                     'raw_segments':raw_segments,
                     'raw_fills':raw_fills,
@@ -2331,6 +2480,9 @@ def main_live():
     _report_lines.append(f"Mode: {NEST_MODE}")
     _report_lines.append(f"Margin: {SHEET_MARGIN}")
     _report_lines.append(f"Spacing: {SPACING}")
+    _report_lines.append(f"Safety halo: {SAFETY_GAP}")
+    _report_lines.append(f"Spacing tolerances: abs={SPACING_ABS_TOL}, rel={SPACING_REL_TOL}")
+    _report_lines.append(f"Minimum spacing pixels: {MIN_SPACING_PIXELS}")
     _report_lines.append(f"Resolution (eff): {eff_scale} px/unit")
     _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
@@ -2368,6 +2520,14 @@ if __name__ == "__main__":
     parser.add_argument("--sheet", nargs=2, metavar=("WIDTH","HEIGHT"), type=float, default=(SHEET_W, SHEET_H))
     parser.add_argument("--margin", type=float, default=SHEET_MARGIN)
     parser.add_argument("--spacing", type=float, default=SPACING)
+    parser.add_argument("--safety-gap", type=float, default=SAFETY_GAP,
+                        help="Extra halo around parts in drawing units for alias protection.")
+    parser.add_argument("--spacing-abs-tol", type=float, default=SPACING_ABS_TOL,
+                        help="Absolute tolerance allowed when quantizing spacing to pixels.")
+    parser.add_argument("--spacing-rel-tol", type=float, default=SPACING_REL_TOL,
+                        help="Relative tolerance (fraction of spacing) for pixel quantization.")
+    parser.add_argument("--min-spacing-px", type=int, default=MIN_SPACING_PIXELS,
+                        help="Minimum pixels dedicated to spacing halo when rasterizing.")
     parser.add_argument("--nest-mode", choices=["bitmap","shelf"], default=NEST_MODE)
     parser.add_argument("--pixels-per-unit", type=int, default=PIXELS_PER_UNIT)
     parser.add_argument("--tries", type=int, default=SHUFFLE_TRIES)
@@ -2397,6 +2557,10 @@ if __name__ == "__main__":
     FOLDER = os.path.abspath(args.folder)
     SHEET_W, SHEET_H = map(float, args.sheet)
     SHEET_MARGIN = float(args.margin); SPACING=float(args.spacing)
+    SAFETY_GAP = max(0.0, float(args.safety_gap))
+    SPACING_ABS_TOL = max(1e-9, float(args.spacing_abs_tol))
+    SPACING_REL_TOL = max(0.0, float(args.spacing_rel_tol))
+    MIN_SPACING_PIXELS = max(1, int(args.min_spacing_px))
     NEST_MODE = args.nest_mode
     PIXELS_PER_UNIT = max(1, int(args.pixels_per_unit))
     SHUFFLE_TRIES = max(1, int(args.tries)); SHUFFLE_SEED=args.seed
