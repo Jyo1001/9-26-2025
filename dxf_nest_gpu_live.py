@@ -1334,17 +1334,25 @@ def bl_place(occ, mask_segments, pw):
     max_x = W - pw + 1
     for y in range(max_y):
         rows = occ[y:y+ph]
-        for x in range(max_x):
-            blocked=False
-            for yy,segs in enumerate(mask_segments):
-                if not segs: continue
-                row=rows[yy]
-                for start,end in segs:
-                    if row.find(1, x+start, x+end) != -1:
-                        blocked=True; break
-                if blocked: break
+        x = 0
+        while x < max_x:
+            skip = 1
+            blocked = False
+            for yy, segs in enumerate(mask_segments):
+                if not segs:
+                    continue
+                row = rows[yy]
+                for start, end in segs:
+                    hit = row.find(1, x + start, x + end)
+                    if hit != -1:
+                        skip = max(skip, hit - (x + start) + 1)
+                        blocked = True
+                        break
+                if blocked:
+                    break
             if not blocked:
-                return (x,y)
+                return (x, y)
+            x += skip
     return None
 
 def or_mask_inplace(occ, mask_segments, mask_fills, ox, oy):
