@@ -1888,13 +1888,13 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                 used=max((pl['sheet'] for out in sheets_out for pl in out), default=-1)+1
                 raise NestAbortPartial(partial, used)
 
-    spacing_key = round(max(0.0, spacing), 9)
     for p in ordered_parts:
         check_ctrl()
         placed=False
         for ang,mirror in p.candidate_poses():
             check_ctrl()
-            key=(scale,spacing_key,ang,mirror)
+            key=(scale,ang,mirror)
+
             if key not in p._cand_cache:
                 w,h,loops=p.oriented(ang,mirror)
                 raw,raw_w,raw_h=rasterize_loops(loops,scale)
@@ -1974,7 +1974,9 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
         if not placed:
             sheets_count+=1
             occ_raw,occ_safe,outlist=ensure_sheet()
-            ang,mirror=0.0,False; key=(scale,spacing_key,ang,mirror)
+
+            ang,mirror=0.0,False; key=(scale,ang,mirror)
+
             if key not in p._cand_cache:
                 w,h,loops=p.oriented(ang,mirror)
                 raw,raw_w,raw_h=rasterize_loops(loops,scale)
