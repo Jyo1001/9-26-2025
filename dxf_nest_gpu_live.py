@@ -70,6 +70,10 @@ HTTP_PORT   = 0  # 0 = auto-pick a free port
 
 import os, math, re, sys, json, time, webbrowser, threading, traceback, datetime
 from typing import List, Tuple, Dict, Optional, Any
+
+Point = Tuple[float, float]
+Loop = List[Point]
+Seg = Tuple[Point, Point]
 from random import Random
 from urllib.parse import urlparse, parse_qs
 
@@ -78,7 +82,9 @@ try:
 except Exception:  # optional dependency for precise offsets
     pyclipper = None
 
-PRECISION_OFFSETS_AVAILABLE = pyclipper is not None
+# A precise polygon offsetter is always available: either pyclipper or a
+# built-in geometric fallback implemented below.
+PRECISION_OFFSETS_AVAILABLE = True
 
 # Fallback sample folder shipped with script
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
@@ -506,10 +512,6 @@ def _warn_precise_offsets_fallback():
     if not PRECISION_OFFSETS_AVAILABLE and not _PRECISION_WARNING_EMITTED:
         log("[WARN] pyclipper not available — spacing accuracy falls back to pixel dilation.")
         _PRECISION_WARNING_EMITTED = True
-
-Point = Tuple[float,float]
-Loop  = List[Point]
-Seg   = Tuple[Point,Point]
 
 # ---------- Torch (optional) ----------
 try:
@@ -946,41 +948,129 @@ def _ensure_orientation(loop: Loop, ccw: bool) -> Loop:
         return list(reversed(loop))
     return list(loop)
 
+def _edge_unit_normal(a: Point, b: Point, orient_sign: float) -> Point:
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-12:
+        return (0.0, 0.0)
+    if orient_sign >= 0:
+        return (dy / length, -dx / length)
+    return (-dy / length, dx / length)
+
+def _line_intersection(p1: Point, p2: Point, p3: Point, p4: Point) -> Optional[Point]:
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    x4, y4 = p4
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(den) <= 1e-12:
+        return None
+    det1 = x1 * y2 - y1 * x2
+    det2 = x3 * y4 - y3 * x4
+    num_x = det1 * (x3 - x4) - (x1 - x2) * det2
+    num_y = det1 * (y3 - y4) - (y1 - y2) * det2
+    return (num_x / den, num_y / den)
+
+def _simple_offset_loop(loop: Loop, delta: float) -> Optional[Loop]:
+    closed = _ensure_closed(loop)
+    if len(closed) < 4 or abs(delta) <= 1e-12:
+        return list(closed)
+    orient_sign = 1.0 if polygon_area(closed) >= 0 else -1.0
+    n = len(closed) - 1
+    out_pts: List[Point] = []
+    for i in range(n):
+        prev_pt = closed[(i - 1) % n]
+        curr_pt = closed[i]
+        next_pt = closed[(i + 1) % n]
+        n1 = _edge_unit_normal(prev_pt, curr_pt, orient_sign)
+        n2 = _edge_unit_normal(curr_pt, next_pt, orient_sign)
+        if n1 == (0.0, 0.0) and n2 == (0.0, 0.0):
+            out_pts.append((curr_pt[0], curr_pt[1]))
+            continue
+        p1a = (prev_pt[0] + n1[0] * delta, prev_pt[1] + n1[1] * delta)
+        p1b = (curr_pt[0] + n1[0] * delta, curr_pt[1] + n1[1] * delta)
+        p2a = (curr_pt[0] + n2[0] * delta, curr_pt[1] + n2[1] * delta)
+        p2b = (next_pt[0] + n2[0] * delta, next_pt[1] + n2[1] * delta)
+        intersect = _line_intersection(p1a, p1b, p2a, p2b)
+        if intersect is None:
+            cx = curr_pt[0] + (n1[0] + n2[0]) * delta
+            cy = curr_pt[1] + (n1[1] + n2[1]) * delta
+            intersect = (cx, cy)
+        out_pts.append(intersect)
+    if not out_pts:
+        return None
+    # Remove near-duplicate consecutive points to keep loops tidy.
+    cleaned: List[Point] = []
+    for pt in out_pts:
+        if not cleaned or math.hypot(pt[0] - cleaned[-1][0], pt[1] - cleaned[-1][1]) > 1e-9:
+            cleaned.append(pt)
+    if len(cleaned) < 3:
+        return None
+    if math.hypot(cleaned[0][0] - cleaned[-1][0], cleaned[0][1] - cleaned[-1][1]) <= 1e-9:
+        cleaned[-1] = cleaned[0]
+    else:
+        cleaned.append(cleaned[0])
+    return cleaned
+
 def _offset_loops_precise(loops: List[Loop], delta: float) -> Optional[List[Loop]]:
     if delta == 0 or not loops:
         return [list(lp) for lp in loops]
-    if pyclipper is None:
-        return None
-    co = pyclipper.PyclipperOffset(miterLimit=CLIPPER_MITER,
-                                   arcTolerance=CLIPPER_ARC_TOL * CLIPPER_SCALE)
-    added = False
+
+    # Prefer pyclipper when available, but fall back to a built-in geometric
+    # offset that keeps the code self-contained.
+    if pyclipper is not None:
+        try:
+            co = pyclipper.PyclipperOffset(miterLimit=CLIPPER_MITER,
+                                           arcTolerance=CLIPPER_ARC_TOL * CLIPPER_SCALE)
+            added = False
+            for idx, lp in enumerate(loops):
+                if len(lp) < 3:
+                    continue
+                want_ccw = (idx == 0)
+                oriented = _ensure_orientation(lp, want_ccw)
+                closed = _ensure_closed(oriented)
+                path = [(int(round(x * CLIPPER_SCALE)), int(round(y * CLIPPER_SCALE)))
+                        for x, y in closed]
+                if len(path) < 3:
+                    continue
+                co.AddPath(path, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+                added = True
+            if added:
+                result = co.Execute(delta * CLIPPER_SCALE)
+                if result:
+                    loops_out = []
+                    for path in result:
+                        pts = [(x / CLIPPER_SCALE, y / CLIPPER_SCALE) for x, y in path]
+                        pts = _ensure_closed(pts)
+                        loops_out.append(pts)
+                    loops_out.sort(key=lambda lp: abs(polygon_area(lp)), reverse=True)
+                    if loops_out:
+                        loops_out[0] = _ensure_orientation(loops_out[0], True)
+                        for i in range(1, len(loops_out)):
+                            loops_out[i] = _ensure_orientation(loops_out[i], False)
+                    return loops_out
+            # If pyclipper had nothing to do, fall back to the simple variant.
+        except Exception:
+            pass
+
+    loops_out: List[Loop] = []
     for idx, lp in enumerate(loops):
         if len(lp) < 3:
             continue
         want_ccw = (idx == 0)
         oriented = _ensure_orientation(lp, want_ccw)
-        closed = _ensure_closed(oriented)
-        path = [(int(round(x * CLIPPER_SCALE)), int(round(y * CLIPPER_SCALE)))
-                for x, y in closed]
-        if len(path) < 3:
+        simple = _simple_offset_loop(oriented, delta)
+        if not simple or len(simple) < 4:
             continue
-        co.AddPath(path, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
-        added = True
-    if not added:
+        loops_out.append(simple)
+    if not loops_out:
+        # Signal caller to fall back to raster dilation when offsetting fails.
         return None
-    result = co.Execute(delta * CLIPPER_SCALE)
-    if not result:
-        return []
-    loops_out = []
-    for path in result:
-        pts = [(x / CLIPPER_SCALE, y / CLIPPER_SCALE) for x, y in path]
-        pts = _ensure_closed(pts)
-        loops_out.append(pts)
     loops_out.sort(key=lambda lp: abs(polygon_area(lp)), reverse=True)
-    if loops_out:
-        loops_out[0] = _ensure_orientation(loops_out[0], True)
-        for i in range(1, len(loops_out)):
-            loops_out[i] = _ensure_orientation(loops_out[i], False)
+    loops_out[0] = _ensure_orientation(loops_out[0], True)
+    for i in range(1, len(loops_out)):
+        loops_out[i] = _ensure_orientation(loops_out[i], False)
     return loops_out
 
 def convex_hull(points: List[Tuple[float,float]]) -> List[Tuple[float,float]]:
