@@ -1041,7 +1041,7 @@ class Part:
         minx,miny,maxx,maxy=bbox_of_loops([self.outer])
         self.w=maxx-minx; self.h=maxy-miny
         self.obb_w,self.obb_h,self.obb_theta = min_area_rect(self.outer)
-        self._cand_cache: Dict[Tuple[int,float,bool], Dict[str,Any]] = {}
+        self._cand_cache: Dict[Tuple[int,float,float,bool], Dict[str,Any]] = {}
         self.uid = Part._uid_counter; Part._uid_counter += 1
 
     def _axis_align_angles(self):
@@ -1894,6 +1894,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
         for ang,mirror in p.candidate_poses():
             check_ctrl()
             key=(scale,ang,mirror)
+
             if key not in p._cand_cache:
                 w,h,loops=p.oriented(ang,mirror)
                 raw,raw_w,raw_h=rasterize_loops(loops,scale)
@@ -1973,7 +1974,9 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
         if not placed:
             sheets_count+=1
             occ_raw,occ_safe,outlist=ensure_sheet()
+
             ang,mirror=0.0,False; key=(scale,ang,mirror)
+
             if key not in p._cand_cache:
                 w,h,loops=p.oriented(ang,mirror)
                 raw,raw_w,raw_h=rasterize_loops(loops,scale)
@@ -2110,16 +2113,22 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         search_scale = max(6, scale // 2)  # coarse for trials → faster
 
     Wpx=max(1,int(math.ceil(W*scale))); Hpx=max(1,int(math.ceil(H*scale))); sheet_penalty=Wpx*Hpx*1000
-    cache: Dict[Tuple[tuple,int], Tuple[List[dict],int,int]] = {}
+    cache: Dict[Tuple[tuple,int,float], Tuple[List[dict],int,int]] = {}
 
-    def evaluate(order: List['Part'], allow_progress: bool, prefix: str = "", use_scale: int = search_scale):
-        key=(_seq_key(order),use_scale)
+    def evaluate(order: List['Part'], allow_progress: bool, prefix: str = "", use_scale: int = search_scale,
+                 spacing_override: Optional[float] = None):
+        eff_spacing = spacing if spacing_override is None else spacing_override
+        spacing_tag = round(max(0.0, eff_spacing), 9)
+        key=(_seq_key(order),use_scale,spacing_tag)
         if key in cache: return cache[key]
-        res=pack_bitmap_core(order,W,H,spacing,use_scale,
+        allow_events = (spacing_override is None) and allow_progress and event_sink is not None
+        res=pack_bitmap_core(order,W,H,eff_spacing,use_scale,
                              progress=(progress if allow_progress else None),
                              progress_total=total_parts if allow_progress else None,
                              progress_prefix=prefix if allow_progress else "",
-                             mask_ops=mask_ops, control=control, event_sink=event_sink)
+                             mask_ops=mask_ops,
+                             control=control,
+                             event_sink=(event_sink if allow_events else None))
         cache[key]=res; return res
 
     best_result=None; best_order=None
@@ -2140,6 +2149,8 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     last_start=None
     for t,(label,start_order) in enumerate(starts):
         if progress: progress(f"{label}placement trial {t+1}/{attempts}…")
+        _ = evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n",
+                     use_scale=search_scale, spacing_override=0.0)
         last_start=evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n", use_scale=search_scale)
         if anneal_limit<=0:
             order_after,result_after=start_order,last_start
@@ -2148,9 +2159,11 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
             if limit<=1:
                 order_after,result_after=start_order,last_start
             else:
-                order_after,result_after=_anneal_order(start_order,
-                    lambda o, allow_progress=False: evaluate(o, allow_progress, prefix=label, use_scale=search_scale),
+                order_after,_=_anneal_order(start_order,
+                    lambda o, allow_progress=False: evaluate(o, allow_progress, prefix=label,
+                                                             use_scale=search_scale, spacing_override=0.0),
                     rnd, sheet_penalty, progress=progress, label=label, max_iters=limit, control=control)
+                result_after=evaluate(order_after, allow_progress=False, prefix=label, use_scale=search_scale)
         final = result_after if _result_is_better(result_after,last_start) else last_start
         final_order = order_after if final is result_after else start_order
         if _result_is_better(final,best_result):
