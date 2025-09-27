@@ -83,6 +83,209 @@ _UI_TOGGLE_DEFS = [
 ]
 
 
+_UI_FIELD_DEFS = [
+    {
+        "key": "folder",
+        "label": "DXF folder",
+        "attr": "FOLDER",
+        "type": "text",
+        "description": "Directory containing DXF files and optional quantity/label text files.",
+        "parser": lambda raw: os.path.abspath(os.path.expanduser(str(raw))),
+    },
+    {
+        "key": "sheet_w",
+        "label": "Sheet width",
+        "attr": "SHEET_W",
+        "type": "number",
+        "min": 0.01,
+        "step": 0.5,
+        "parser": lambda raw: max(0.01, float(raw)),
+    },
+    {
+        "key": "sheet_h",
+        "label": "Sheet height",
+        "attr": "SHEET_H",
+        "type": "number",
+        "min": 0.01,
+        "step": 0.5,
+        "parser": lambda raw: max(0.01, float(raw)),
+    },
+    {
+        "key": "sheet_margin",
+        "label": "Sheet margin",
+        "attr": "SHEET_MARGIN",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.05,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "sheet_gap",
+        "label": "Gap between exported sheets",
+        "attr": "SHEET_GAP",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.1,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "spacing",
+        "label": "Part spacing",
+        "attr": "SPACING",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.01,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "join_tol",
+        "label": "Join tolerance",
+        "attr": "JOIN_TOL",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.001,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "arc_chord_tol",
+        "label": "Arc chord tolerance",
+        "attr": "ARC_CHORD_TOL",
+        "type": "number",
+        "min": 0.0,
+        "step": 0.001,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "rect_align_mode",
+        "label": "Rectangular alignment",
+        "attr": "RECT_ALIGN_MODE",
+        "type": "select",
+        "options": [
+            {"value": "off", "label": "Off"},
+            {"value": "prefer", "label": "Prefer"},
+            {"value": "force", "label": "Force"},
+        ],
+        "parser": lambda raw: (str(raw).lower() if str(raw).lower() in {"off", "prefer", "force"} else RECT_ALIGN_MODE),
+    },
+    {
+        "key": "rect_align_tol",
+        "label": "Rectangular align tolerance",
+        "attr": "RECT_ALIGN_TOL",
+        "type": "number",
+        "min": 0.0,
+        "step": 1e-4,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "nest_mode",
+        "label": "Nesting mode",
+        "attr": "NEST_MODE",
+        "type": "select",
+        "options": [
+            {"value": "bitmap", "label": "Bitmap (fast, dense)"},
+            {"value": "shelf", "label": "Shelf (simple)"},
+        ],
+        "parser": lambda raw: (str(raw).lower() if str(raw).lower() in {"bitmap", "shelf"} else NEST_MODE),
+    },
+    {
+        "key": "pixels_per_unit",
+        "label": "Pixels per unit",
+        "attr": "PIXELS_PER_UNIT",
+        "type": "number",
+        "min": 1,
+        "step": 1,
+        "parser": lambda raw: max(1, int(float(raw))),
+    },
+    {
+        "key": "bitmap_workers",
+        "label": "Bitmap workers",
+        "attr": "BITMAP_EVAL_WORKERS",
+        "type": "number",
+        "min": 1,
+        "step": 1,
+        "allow_none": True,
+        "parser": lambda raw: max(1, int(float(raw))),
+    },
+    {
+        "key": "bitmap_device",
+        "label": "Bitmap device",
+        "attr": "BITMAP_DEVICE",
+        "type": "text",
+        "allow_none": True,
+        "description": "PyTorch device string (e.g. cuda, cuda:0, cpu). Leave blank for auto.",
+        "parser": lambda raw: (str(raw).strip() or None),
+    },
+    {
+        "key": "shuffle_tries",
+        "label": "Shuffle tries",
+        "attr": "SHUFFLE_TRIES",
+        "type": "number",
+        "min": 1,
+        "step": 1,
+        "parser": lambda raw: max(1, int(float(raw))),
+    },
+    {
+        "key": "shuffle_seed",
+        "label": "Shuffle seed",
+        "attr": "SHUFFLE_SEED",
+        "type": "number",
+        "allow_none": True,
+        "parser": lambda raw: int(float(raw)),
+    },
+    {
+        "key": "thickness_units",
+        "label": "Thickness label units",
+        "attr": "THICKNESS_LABEL_UNITS",
+        "type": "select",
+        "options": [
+            {"value": "auto", "label": "Auto"},
+            {"value": "in", "label": "Inches"},
+            {"value": "mm", "label": "Millimetres"},
+        ],
+        "parser": lambda raw: (str(raw).lower() if str(raw).lower() in {"auto", "in", "mm"} else THICKNESS_LABEL_UNITS),
+    },
+    {
+        "key": "rotation_step",
+        "label": "Rotation step (deg)",
+        "attr": "ROTATION_STEP_DEG",
+        "type": "number",
+        "min": 0.0,
+        "step": 1.0,
+        "parser": lambda raw: max(0.0, float(raw)),
+    },
+    {
+        "key": "safety_px",
+        "label": "Safety pixels",
+        "attr": "SAFETY_PX",
+        "type": "number",
+        "min": 0,
+        "step": 1,
+        "parser": lambda raw: max(0, int(float(raw))),
+    },
+    {
+        "key": "min_spacing_px",
+        "label": "Minimum spacing pixels",
+        "attr": "MIN_SPACING_PIXELS",
+        "type": "number",
+        "min": 1,
+        "step": 1,
+        "parser": lambda raw: max(1, int(float(raw))),
+    },
+    {
+        "key": "insunits",
+        "label": "DXF INSUNITS header",
+        "attr": "INSUNITS",
+        "type": "select",
+        "options": [
+            {"value": "in", "label": "Inches"},
+            {"value": "mm", "label": "Millimetres"},
+        ],
+        "parser": lambda raw: (1 if str(raw).lower() != "mm" else 4),
+        "to_ui": lambda val: "mm" if int(val)==4 else "in",
+    },
+]
+
+
 def _ui_toggle_snapshot():
     snap = []
     g = globals()
@@ -96,6 +299,36 @@ def _ui_toggle_snapshot():
     return snap
 
 
+def _ui_field_snapshot():
+    snap = []
+    g = globals()
+    for field in _UI_FIELD_DEFS:
+        attr = field["attr"]
+        raw_val = g.get(attr)
+        to_ui = field.get("to_ui")
+        try:
+            value = to_ui(raw_val) if to_ui else raw_val
+        except Exception:
+            value = raw_val
+        if value is None:
+            value = ""
+        entry = {
+            "key": field["key"],
+            "label": field.get("label", field["key"]),
+            "type": field.get("type", "text"),
+            "value": value,
+            "description": field.get("description"),
+        }
+        for extra in ("min", "max", "step", "placeholder"):
+            if extra in field:
+                entry[extra] = field[extra]
+        options = field.get("options")
+        if options:
+            entry["options"] = options
+        snap.append(entry)
+    return snap
+
+
 def _apply_toggle_config(cfg: Dict[str, Any]):
     if not isinstance(cfg, dict):
         return
@@ -103,6 +336,31 @@ def _apply_toggle_config(cfg: Dict[str, Any]):
     for key, _label, attr, _desc in _UI_TOGGLE_DEFS:
         if key in cfg:
             g[attr] = bool(cfg[key])
+
+
+def _apply_field_config(cfg: Dict[str, Any]):
+    if not isinstance(cfg, dict):
+        return
+    g = globals()
+    for field in _UI_FIELD_DEFS:
+        key = field["key"]
+        if key not in cfg:
+            continue
+        raw = cfg[key]
+        if raw is None:
+            if field.get("allow_none"):
+                g[field["attr"]] = None
+            continue
+        if isinstance(raw, str) and raw.strip() == "":
+            if field.get("allow_none"):
+                g[field["attr"]] = None
+            continue
+        parser = field.get("parser")
+        try:
+            value = parser(raw) if parser else raw
+        except Exception:
+            continue
+        g[field["attr"]] = value
 
 
 # ---------- Tiny Win progress window (optional) ----------
@@ -906,12 +1164,16 @@ def write_standalone_html(path_on_disk: str):
   #progress {{ width:100%; height:14px; border-radius:8px; background:#121a24; overflow:hidden; border:1px solid #223; }}
   #bar {{ height:100%; width:0%; background:linear-gradient(90deg,var(--accent),#23a8f2); }}
   .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-  select, input[type=number] {{ background:#0f1620; color:var(--fg); border:1px solid #223; border-radius:8px; padding:6px; width:100%; }}
+  select, input[type=number], input[type=text] {{ background:#0f1620; color:var(--fg); border:1px solid #223; border-radius:8px; padding:6px; width:100%; }}
   .small {{ font-size:12px; color:var(--muted); }}
   .pill {{ font-size:12px; padding:2px 8px; border:1px solid #2b3b52; border-radius:999px; }}
   .ok {{ border-color:var(--accent); color:var(--accent); }}
   .warn {{ border-color:var(--warn); color:var(--warn); }}
-  #optionsWrap {{ display:flex; flex-direction:column; gap:6px; margin:8px 0 10px; }}
+  #fieldsWrap {{ display:flex; flex-direction:column; gap:8px; margin:10px 0 8px; }}
+  .fieldRow {{ display:flex; flex-direction:column; gap:4px; }}
+  .fieldLabel {{ font-size:13px; color:var(--fg); }}
+  .fieldHint {{ font-size:11px; color:var(--muted); }}
+  #optionsWrap {{ display:flex; flex-direction:column; gap:6px; margin:6px 0 10px; }}
   .optCheck {{ display:flex; align-items:center; gap:8px; font-size:13px; }}
   .optCheck input {{ width:16px; height:16px; }}
 </style>
@@ -932,6 +1194,7 @@ def write_standalone_html(path_on_disk: str):
     <div class="row" id="configPanel">
       <div class="label">Run setup</div>
       <div class="small" id="configMsg">Loading options…</div>
+      <div id="fieldsWrap"></div>
       <div id="optionsWrap"></div>
       <button id="startBtn" class="accent" disabled>Start Nesting</button>
     </div>
@@ -972,11 +1235,19 @@ const resumeBtn = document.getElementById('resumeBtn');
 const stopBtn = document.getElementById('stopBtn');
 const startBtn = document.getElementById('startBtn');
 const optionsWrap = document.getElementById('optionsWrap');
+const fieldsWrap = document.getElementById('fieldsWrap');
 const configMsg = document.getElementById('configMsg');
 const sheetSel = document.getElementById('sheetSelect');
 
 let runStarted = false;
 let startRequested = false;
+
+function updateInputDisabledState() {{
+  const disabled = runStarted || startRequested;
+  document.querySelectorAll('#configPanel input, #configPanel select').forEach(el => {{
+    el.disabled = disabled;
+  }});
+}}
 
 // Maintain sheet → paths in a Map
 let sheets = new Map(); // sheetIndex -> {{paths: [ [ [x,y],... ] ], bbox:[W,H], margin:M}}
@@ -984,11 +1255,75 @@ let sheets = new Map(); // sheetIndex -> {{paths: [ [ [x,y],... ] ], bbox:[W,H],
 function setRunState(active) {{
   runStarted = active;
   [pauseBtn, resumeBtn, stopBtn].forEach(btn => {{ if (btn) btn.disabled = !active; }});
-  optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = active; }});
+  updateInputDisabledState();
   if (active) {{
     startBtn.disabled = true;
     startBtn.textContent = 'Running…';
   }}
+}}
+
+function renderFields(fields) {{
+  fieldsWrap.innerHTML = '';
+  if (!Array.isArray(fields) || fields.length === 0) {{
+    const msg = document.createElement('div');
+    msg.className = 'small';
+    msg.textContent = 'No configurable fields exposed.';
+    fieldsWrap.appendChild(msg);
+    updateInputDisabledState();
+    return;
+  }}
+  for (const field of fields) {{
+    const id = `fld_${{field.key}}`;
+    const row = document.createElement('div');
+    row.className = 'fieldRow';
+    const label = document.createElement('label');
+    label.className = 'fieldLabel';
+    label.htmlFor = id;
+    label.textContent = field.label || field.key;
+    row.appendChild(label);
+    let input;
+    if (field.type === 'select' && Array.isArray(field.options)) {{
+      const sel = document.createElement('select');
+      sel.id = id;
+      sel.dataset.key = field.key;
+      sel.dataset.type = 'select';
+      for (const opt of field.options) {{
+        const optEl = document.createElement('option');
+        optEl.value = opt.value;
+        optEl.textContent = opt.label || opt.value;
+        if (field.value !== undefined && field.value !== null && String(field.value) === String(opt.value)) {{
+          optEl.selected = true;
+        }}
+        sel.appendChild(optEl);
+      }}
+      input = sel;
+    }} else {{
+      const inp = document.createElement('input');
+      inp.id = id;
+      inp.dataset.key = field.key;
+      inp.type = field.type === 'number' ? 'number' : 'text';
+      inp.dataset.type = inp.type;
+      if (field.value !== undefined && field.value !== null) {{
+        inp.value = field.value;
+      }} else {{
+        inp.value = '';
+      }}
+      if (field.min !== undefined) inp.min = field.min;
+      if (field.max !== undefined) inp.max = field.max;
+      if (field.step !== undefined) inp.step = field.step;
+      if (field.placeholder) inp.placeholder = field.placeholder;
+      input = inp;
+    }}
+    row.appendChild(input);
+    if (field.description) {{
+      const hint = document.createElement('div');
+      hint.className = 'fieldHint';
+      hint.textContent = field.description;
+      row.appendChild(hint);
+    }}
+    fieldsWrap.appendChild(row);
+  }}
+  updateInputDisabledState();
 }}
 
 function renderOptions(opts) {{
@@ -1009,7 +1344,6 @@ function renderOptions(opts) {{
     cb.id = id;
     cb.dataset.key = opt.key;
     cb.checked = !!opt.value;
-    cb.disabled = runStarted || startRequested;
     const span = document.createElement('span');
     span.textContent = opt.label;
     if (opt.description) span.title = opt.description;
@@ -1017,6 +1351,7 @@ function renderOptions(opts) {{
     label.appendChild(span);
     optionsWrap.appendChild(label);
   }}
+  updateInputDisabledState();
 }}
 
 async function fetchConfig() {{
@@ -1024,6 +1359,7 @@ async function fetchConfig() {{
     const resp = await fetch('/config');
     if (!resp.ok) throw new Error('HTTP '+resp.status);
     const data = await resp.json();
+    if (Array.isArray(data.fields)) renderFields(data.fields);
     if (Array.isArray(data.options)) renderOptions(data.options);
     const phase = data.status && data.status.phase;
     if (!runStarted && (phase === 'waiting' || phase === 'idle')) {{
@@ -1042,8 +1378,21 @@ startBtn.addEventListener('click', async () => {{
   optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{
     payload[cb.dataset.key] = cb.checked;
   }});
+  fieldsWrap.querySelectorAll('input, select').forEach(el => {{
+    const key = el.dataset.key;
+    if (!key) return;
+    if (el.tagName === 'SELECT') {{
+      payload[key] = el.value;
+      return;
+    }}
+    if (el.type === 'number') {{
+      payload[key] = el.value === '' ? null : el.value;
+    }} else {{
+      payload[key] = el.value;
+    }}
+  }});
   startRequested = true;
-  optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = true; }});
+  updateInputDisabledState();
   startBtn.disabled = true;
   startBtn.textContent = 'Starting…';
   configMsg.textContent = 'Submitting…';
@@ -1060,7 +1409,7 @@ startBtn.addEventListener('click', async () => {{
     configMsg.textContent = 'Waiting for backend…';
   }} catch (err) {{
     startRequested = false;
-    optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = false; }});
+    updateInputDisabledState();
     startBtn.disabled = false;
     startBtn.textContent = 'Start Nesting';
     configMsg.textContent = 'Start failed: '+err.message;
@@ -1141,8 +1490,9 @@ es.onmessage = (ev) => {{
   try {{
     const msg = JSON.parse(ev.data||'{{}}');
     if (msg.type==='waiting') {{
-      setRunState(false);
       startRequested = false;
+      setRunState(false);
+      if (Array.isArray(msg.fields)) renderFields(msg.fields);
       if (Array.isArray(msg.options)) renderOptions(msg.options);
       const text = msg.message || 'Waiting for Start…';
       configMsg.textContent = text;
@@ -1153,7 +1503,7 @@ es.onmessage = (ev) => {{
     }}
     if (msg.type==='starting') {{
       startRequested = true;
-      optionsWrap.querySelectorAll('input[type=checkbox]').forEach(cb => {{ cb.disabled = true; }});
+      updateInputDisabledState();
       configMsg.textContent = 'Starting…';
       startBtn.disabled = true;
       startBtn.textContent = 'Starting…';
@@ -1161,6 +1511,7 @@ es.onmessage = (ev) => {{
       return;
     }}
     if (msg.type==='options_applied') {{
+      if (Array.isArray(msg.fields)) renderFields(msg.fields);
       if (Array.isArray(msg.options)) renderOptions(msg.options);
       return;
     }}
@@ -1271,7 +1622,11 @@ class NestHTTPHandler(BaseHTTPRequestHandler):
             self._set_headers(200, "application/json"); self.wfile.write(json.dumps(st).encode("utf-8")); return
 
         if p.path == "/config":
-            payload = {"options": _ui_toggle_snapshot(), "status": self.control.get_status()}
+            payload = {
+                "options": _ui_toggle_snapshot(),
+                "fields": _ui_field_snapshot(),
+                "status": self.control.get_status(),
+            }
             self._set_headers(200, "application/json"); self.wfile.write(json.dumps(payload).encode("utf-8")); return
 
         self._set_headers(404, "text/plain"); self.wfile.write(b"Not found")
@@ -1309,8 +1664,28 @@ class NestHTTPHandler(BaseHTTPRequestHandler):
 
 def start_http_server(folder:str, ui_filename:str, cuda_on:bool, control:NestControl, hub:SSEHub,
                       port:int=0, host:str="127.0.0.1"):
-    ui_path = os.path.join(folder, ui_filename)
-    write_standalone_html(ui_path)
+    ui_path = None
+    ui_dir_candidates = []
+    if folder and os.path.isdir(folder):
+        ui_dir_candidates.append(folder)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in ui_dir_candidates:
+        ui_dir_candidates.append(script_dir)
+    cwd = os.getcwd()
+    if cwd not in ui_dir_candidates:
+        ui_dir_candidates.append(cwd)
+
+    last_exc = None
+    for candidate in ui_dir_candidates:
+        try:
+            ui_path = os.path.join(candidate, ui_filename)
+            write_standalone_html(ui_path)
+            break
+        except Exception as exc:
+            last_exc = exc
+            ui_path = None
+    if ui_path is None:
+        raise last_exc or RuntimeError("Unable to write UI HTML file")
 
     class _Server(ThreadingHTTPServer): daemon_threads=True
     NestHTTPHandler.hub = hub
@@ -1764,35 +2139,11 @@ def write_split_sheets(base_path_no_ext: str, placements: List[dict], total_shee
 def main_live():
     prog = WinProgress("Nesting DXF… (HTML live viewer)", 520, 220); prog.create()
 
-    if not os.path.isdir(FOLDER):
-        log(f"[ERROR] Folder not found: {FOLDER}"); prog.update("Folder not found."); prog.close(); return
-
-    dxf_files = sorted([f for f in os.listdir(FOLDER) if f.lower().endswith(".dxf") and f.lower()!="nested.dxf"])
-    if not dxf_files:
-        log(f"[WARN] No .dxf files found in: {FOLDER}"); prog.update("No .dxf files found."); prog.close(); return
-
-    W_eff=SHEET_W-2*SHEET_MARGIN; H_eff=SHEET_H-2*SHEET_MARGIN
-    if W_eff<=0 or H_eff<=0:
-        msg=f"[ERROR] SHEET_MARGIN={SHEET_MARGIN} leaves no usable area on a {SHEET_W}×{SHEET_H} sheet."
-        log(msg); prog.update(msg); prog.close(); return
-
-    eff_scale = _eff_scale(PIXELS_PER_UNIT, SPACING)
-
-    # Prepare control + SSE
     control = NestControl()
     hub = SSEHub()
 
-    # accelerator
-    mask_ops = build_mask_ops(BITMAP_DEVICE)
-    accel_note = "Acceleration: CPU bitmap evaluator"; using_cuda=False
-    if mask_ops:
-        dev = getattr(mask_ops, "device", "cpu"); dev_type = getattr(dev, "type", str(dev))
-        if str(dev_type).lower()=="cuda": using_cuda=True; accel_note=f"Acceleration: CUDA GPU ({dev}) via PyTorch"
-        elif str(dev).lower()=="numpy": accel_note = "Acceleration: NumPy (CPU)"
-        else: accel_note=f"Acceleration: PyTorch device {dev}"
-
-    # start HTTP server + open viewer
-    srv, bound_host, port = start_http_server(FOLDER, UI_FILENAME, using_cuda, control, hub, HTTP_PORT, HTTP_HOST)
+    # start HTTP server + open viewer (GPU status filled in after configuration)
+    srv, bound_host, port = start_http_server(FOLDER, UI_FILENAME, False, control, hub, HTTP_PORT, HTTP_HOST)
     open_host = "127.0.0.1" if bound_host in ("0.0.0.0", "::", "") else bound_host
     url=f"http://{open_host}:{port}/"
     try: webbrowser.open(url)
@@ -1804,7 +2155,7 @@ def main_live():
 
     wait_text = "Viewer ready — adjust options in the browser and press Start."
     control.set_status(phase="waiting")
-    hub.broadcast("waiting", {"message": wait_text, "options": _ui_toggle_snapshot()})
+    hub.broadcast("waiting", {"message": wait_text, "options": _ui_toggle_snapshot(), "fields": _ui_field_snapshot()})
     prog.update(wait_text)
 
     # status helpers
@@ -1820,11 +2171,52 @@ def main_live():
 
     # Wait for the UI to kick off the run
     start_config = control.wait_for_start()
+    _apply_field_config(start_config)
     _apply_toggle_config(start_config)
     applied_opts = _ui_toggle_snapshot()
-    hub.broadcast("options_applied", {"options": applied_opts})
+    applied_fields = _ui_field_snapshot()
+    hub.broadcast("options_applied", {"options": applied_opts, "fields": applied_fields})
     for opt in applied_opts:
         log(f"[INFO] {opt['label']}: {'ON' if opt['value'] else 'OFF'}")
+
+    # configure accelerator now that device selection may have changed
+    mask_ops = build_mask_ops(BITMAP_DEVICE)
+    accel_note = "Acceleration: CPU bitmap evaluator"; using_cuda=False
+    if mask_ops:
+        dev = getattr(mask_ops, "device", "cpu"); dev_type = getattr(dev, "type", str(dev))
+        if str(dev_type).lower()=="cuda": using_cuda=True; accel_note=f"Acceleration: CUDA GPU ({dev}) via PyTorch"
+        elif str(dev).lower()=="numpy": accel_note = "Acceleration: NumPy (CPU)"
+        else: accel_note=f"Acceleration: PyTorch device {dev}"
+    NestHTTPHandler.cuda_on = using_cuda
+    hub.broadcast("hello", {"cuda": using_cuda})
+
+    if not os.path.isdir(FOLDER):
+        msg=f"[ERROR] Folder not found: {FOLDER}"
+        log(msg)
+        control.set_status(phase="done")
+        hub.broadcast("progress", {"text": "Folder not found."})
+        hub.broadcast("done", {"outputs": []})
+        prog.update("Folder not found."); prog.close(); return
+
+    dxf_files = sorted([f for f in os.listdir(FOLDER) if f.lower().endswith(".dxf") and f.lower()!="nested.dxf"])
+    if not dxf_files:
+        msg=f"[WARN] No .dxf files found in: {FOLDER}"
+        log(msg)
+        control.set_status(phase="done")
+        hub.broadcast("progress", {"text": "No .dxf files found."})
+        hub.broadcast("done", {"outputs": []})
+        prog.update("No .dxf files found."); prog.close(); return
+
+    W_eff=SHEET_W-2*SHEET_MARGIN; H_eff=SHEET_H-2*SHEET_MARGIN
+    if W_eff<=0 or H_eff<=0:
+        msg=f"[ERROR] SHEET_MARGIN={SHEET_MARGIN} leaves no usable area on a {SHEET_W}×{SHEET_H} sheet."
+        log(msg)
+        control.set_status(phase="done")
+        hub.broadcast("progress", {"text": msg})
+        hub.broadcast("done", {"outputs": []})
+        prog.update(msg); prog.close(); return
+
+    eff_scale = _eff_scale(PIXELS_PER_UNIT, SPACING)
 
     control.set_status(phase="reading")
     hub.broadcast("progress", {"text":"Reading DXFs…"})
