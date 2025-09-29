@@ -1186,19 +1186,24 @@ class Part:
 
     def _spacing_signature(self, spacing_units: float, spacing_px: int,
                             safety_units: float, safety_px: int,
+
                             allow_holes: bool) -> Tuple[bool,int,int,float,float]:
+
         return (
             bool(allow_holes),
             int(spacing_px),
             int(safety_px),
             round(float(max(0.0, spacing_units)), 9),
             round(float(max(0.0, safety_units)), 9),
+
         )
 
     def ensure_candidate(self, scale: int, theta: float, mirror: bool,
                          spacing_units: float, spacing_px: int,
                          safety_units: float, safety_px: int,
+
                          allow_holes: bool) -> Dict[str, Any]:
+
         if self.outer is None:
             raise ValueError("Cannot build candidate data for empty part")
 
@@ -1226,7 +1231,9 @@ class Part:
 
         spacing_sig = self._spacing_signature(spacing_units, spacing_px,
                                               safety_units, safety_px,
+
                                               allow_holes)
+
         variant = base['variants'].get(spacing_sig)
         if variant is None:
             if allow_holes:
@@ -1239,6 +1246,7 @@ class Part:
                 base_w, base_h = base['outer_w'], base['outer_h']
 
             spacing_units = max(0.0, spacing_units)
+
             precise_test = _offset_loops_precise(base_loops, spacing_units + safety_units)
             precise_occ = _offset_loops_precise(base_loops, safety_units)
             if precise_test is not None and precise_occ is not None:
@@ -1246,6 +1254,7 @@ class Part:
                 occ_pad, _, _ = rasterize_loops(precise_occ, scale)
             else:
                 _warn_precise_offsets_fallback()
+
                 test = dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
                 occ_pad = dilate_mask(base_mask, base_w, base_h, safety_px)
                 test_w, test_h = base_w, base_h
@@ -2038,7 +2047,8 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional[Any] = None,
                      control: Optional[NestControl] = None,
-                     event_sink: Optional[callable] = None):
+                     event_sink: Optional[callable] = None,
+                     precise_offsets: bool = True):
     Wpx=max(1,int(math.ceil(W*scale))); Hpx=max(1,int(math.ceil(H*scale)))
     spacing_units=max(0.0, spacing)
     spacing_px=int(math.ceil(spacing_units*scale))
@@ -2073,7 +2083,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
         for ang,mirror in p.candidate_poses():
             check_ctrl()
             cand=p.ensure_candidate(scale, ang, mirror, spacing_units, spacing_px,
-                                    safety_units, safety_px, ALLOW_NEST_IN_HOLES)
+
             if mask_ops:
                 if 'test_tensor' not in cand: cand['test_tensor']=mask_ops.mask_to_tensor(cand['test'])
                 if 'occ_tensor'  not in cand: cand['occ_tensor'] =mask_ops.mask_to_tensor(cand['occ'])
@@ -2117,7 +2127,9 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
             ang,mirror=0.0,False
             cand=p.ensure_candidate(scale, ang, mirror, spacing_units, spacing_px,
+
                                     safety_units, safety_px, ALLOW_NEST_IN_HOLES)
+
             if mask_ops:
                 if 'raw_tensor' not in cand: cand['raw_tensor']=mask_ops.mask_to_tensor(cand['raw'])
                 if 'occ_tensor' not in cand: cand['occ_tensor']=mask_ops.mask_to_tensor(cand['occ'])
@@ -2215,22 +2227,28 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         search_scale = max(6, scale // 2)  # coarse for trials → faster
 
     Wpx=max(1,int(math.ceil(W*scale))); Hpx=max(1,int(math.ceil(H*scale))); sheet_penalty=Wpx*Hpx*1000
-    cache: Dict[Tuple[tuple,int,float], Tuple[List[dict],int,int]] = {}
+    cache: Dict[Tuple[tuple,int,float,bool], Tuple[List[dict],int,int]] = {}
 
     def evaluate(order: List['Part'], allow_progress: bool, prefix: str = "", use_scale: int = search_scale,
-                 spacing_override: Optional[float] = None):
+                 spacing_override: Optional[float] = None,
+                 precise_offsets: Optional[bool] = None):
         eff_spacing = spacing if spacing_override is None else spacing_override
         spacing_tag = round(max(0.0, eff_spacing), 9)
-        key=(_seq_key(order),use_scale,spacing_tag)
+        if precise_offsets is None:
+            precise_flag = (spacing_override is None and use_scale == scale)
+        else:
+            precise_flag = precise_offsets
+        key=(_seq_key(order),use_scale,spacing_tag, precise_flag)
         if key in cache: return cache[key]
-        allow_events = (spacing_override is None) and allow_progress and event_sink is not None
+        allow_events = (spacing_override is None) and allow_progress and event_sink is not None and precise_flag
         res=pack_bitmap_core(order,W,H,eff_spacing,use_scale,
                              progress=(progress if allow_progress else None),
                              progress_total=total_parts if allow_progress else None,
                              progress_prefix=prefix if allow_progress else "",
                              mask_ops=mask_ops,
                              control=control,
-                             event_sink=(event_sink if allow_events else None))
+                             event_sink=(event_sink if allow_events else None),
+                             precise_offsets=precise_flag)
         cache[key]=res; return res
 
     best_result=None; best_order=None
@@ -2252,8 +2270,10 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     for t,(label,start_order) in enumerate(starts):
         if progress: progress(f"{label}placement trial {t+1}/{attempts}…")
         _ = evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n",
-                     use_scale=search_scale, spacing_override=0.0)
-        last_start=evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n", use_scale=search_scale)
+                     use_scale=search_scale, spacing_override=0.0,
+                     precise_offsets=False)
+        last_start=evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n",
+                             use_scale=search_scale, precise_offsets=False)
         if anneal_limit<=0:
             order_after,result_after=start_order,last_start
         else:
@@ -2263,9 +2283,11 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
             else:
                 order_after,_=_anneal_order(start_order,
                     lambda o, allow_progress=False: evaluate(o, allow_progress, prefix=label,
-                                                             use_scale=search_scale, spacing_override=0.0),
+                                                             use_scale=search_scale, spacing_override=0.0,
+                                                             precise_offsets=False),
                     rnd, sheet_penalty, progress=progress, label=label, max_iters=limit, control=control)
-                result_after=evaluate(order_after, allow_progress=False, prefix=label, use_scale=search_scale)
+                result_after=evaluate(order_after, allow_progress=False, prefix=label, use_scale=search_scale,
+                                      precise_offsets=False)
         final = result_after if _result_is_better(result_after,last_start) else last_start
         final_order = order_after if final is result_after else start_order
         if _result_is_better(final,best_result):
@@ -2276,7 +2298,8 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     if best_result is None:
         best_result=last_start; best_order=starts[0][1] if starts else base
     final_order=best_order if best_order is not None else base
-    final_result=evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale)
+    final_result=evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale,
+                          precise_offsets=True)
     return final_result[0], final_result[1]
 
 # ---------- Shelf fallback ----------
