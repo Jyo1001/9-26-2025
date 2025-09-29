@@ -1131,7 +1131,7 @@ class Part:
         minx,miny,maxx,maxy=bbox_of_loops([self.outer])
         self.w=maxx-minx; self.h=maxy-miny
         self.obb_w,self.obb_h,self.obb_theta = min_area_rect(self.outer)
-        self._cand_cache: Dict[Tuple[int,float,float,bool], Dict[str,Any]] = {}
+        self._cand_cache: Dict[Tuple[int,float,bool], Dict[str,Any]] = {}
         self.uid = Part._uid_counter; Part._uid_counter += 1
 
     def _axis_align_angles(self):
@@ -1180,6 +1180,100 @@ class Part:
             loops_src = [rotate_loop(lp, theta) for lp in loops_src]
         minx,miny,maxx,maxy=bbox_of_loops([loops_src[0]])
         return (maxx-minx),(maxy-miny),loops_src
+
+    def _candidate_base_key(self, scale: int, theta: float, mirror: bool) -> Tuple[int,float,bool]:
+        return (int(scale), round(theta % (2*math.pi), 9), bool(mirror))
+
+    def _spacing_signature(self, spacing_units: float, spacing_px: int,
+                            safety_units: float, safety_px: int,
+                            allow_holes: bool, precise_offsets: bool) -> Tuple[bool,int,int,float,float,bool]:
+        return (
+            bool(allow_holes),
+            int(spacing_px),
+            int(safety_px),
+            round(float(max(0.0, spacing_units)), 9),
+            round(float(max(0.0, safety_units)), 9),
+            bool(precise_offsets),
+        )
+
+    def ensure_candidate(self, scale: int, theta: float, mirror: bool,
+                         spacing_units: float, spacing_px: int,
+                         safety_units: float, safety_px: int,
+                         allow_holes: bool,
+                         precise_offsets: bool = True) -> Dict[str, Any]:
+        if self.outer is None:
+            raise ValueError("Cannot build candidate data for empty part")
+
+        base_key = self._candidate_base_key(scale, theta, mirror)
+        base = self._cand_cache.get(base_key)
+        if base is None:
+            w,h,loops = self.oriented(theta, mirror)
+            raw, raw_w, raw_h = rasterize_loops(loops, scale)
+            raw_segments, raw_fills = _mask_segments_and_fills(raw)
+            outer, outer_w, outer_h = rasterize_outer_only(loops, scale)
+            base = {
+                'loops': loops,
+                'raw': raw,
+                'raw_w': raw_w,
+                'raw_h': raw_h,
+                'raw_segments': raw_segments,
+                'raw_fills': raw_fills,
+                'outer_loops': [loops[0]] if loops else [],
+                'outer_mask': outer,
+                'outer_w': outer_w,
+                'outer_h': outer_h,
+                'variants': {}
+            }
+            self._cand_cache[base_key] = base
+
+        spacing_sig = self._spacing_signature(spacing_units, spacing_px,
+                                              safety_units, safety_px,
+                                              allow_holes, precise_offsets)
+        variant = base['variants'].get(spacing_sig)
+        if variant is None:
+            if allow_holes:
+                base_loops = base['loops']
+                base_mask = base['raw']
+                base_w, base_h = base['raw_w'], base['raw_h']
+            else:
+                base_loops = base['outer_loops']
+                base_mask = base['outer_mask']
+                base_w, base_h = base['outer_w'], base['outer_h']
+
+            spacing_units = max(0.0, spacing_units)
+            precise_test = precise_occ = None
+            if precise_offsets:
+                precise_test = _offset_loops_precise(base_loops, spacing_units + safety_units)
+                precise_occ = _offset_loops_precise(base_loops, safety_units)
+
+            if precise_offsets and precise_test is not None and precise_occ is not None:
+                test, test_w, test_h = rasterize_loops(precise_test, scale)
+                occ_pad, _, _ = rasterize_loops(precise_occ, scale)
+            else:
+                if precise_offsets:
+                    _warn_precise_offsets_fallback()
+                test = dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
+                occ_pad = dilate_mask(base_mask, base_w, base_h, safety_px)
+                test_w, test_h = base_w, base_h
+
+            test_segments, _ = _mask_segments_and_fills(test)
+            occ_segments, occ_fills = _mask_segments_and_fills(occ_pad)
+            variant = {
+                'loops': base['loops'],
+                'raw': base['raw'],
+                'raw_segments': base['raw_segments'],
+                'raw_fills': base['raw_fills'],
+                'occ': occ_pad,
+                'occ_segments': occ_segments,
+                'occ_fills': occ_fills,
+                'test': test,
+                'test_segments': test_segments,
+                'pw': test_w,
+                'ph': test_h,
+            }
+            base['variants'][spacing_sig] = variant
+
+        return variant
 
 # ---------- Raster helpers ----------
 def _empty_mask(w:int, h:int): return [bytearray(w) for _ in range(h)]
@@ -1950,9 +2044,11 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional[Any] = None,
                      control: Optional[NestControl] = None,
-                     event_sink: Optional[callable] = None):
+                     event_sink: Optional[callable] = None,
+                     precise_offsets: bool = True):
     Wpx=max(1,int(math.ceil(W*scale))); Hpx=max(1,int(math.ceil(H*scale)))
-    spacing_px=int(math.ceil(max(0.0, spacing)*scale))
+    spacing_units=max(0.0, spacing)
+    spacing_px=int(math.ceil(spacing_units*scale))
     safety_px = SAFETY_PX
     if SAFETY_GAP > 0:
         safety_px = max(safety_px, int(math.ceil(SAFETY_GAP * scale)))
@@ -1983,47 +2079,9 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
         placed=False
         for ang,mirror in p.candidate_poses():
             check_ctrl()
-            key=(scale,ang,mirror)
-
-            if key not in p._cand_cache:
-                w,h,loops=p.oriented(ang,mirror)
-                raw,raw_w,raw_h=rasterize_loops(loops,scale)
-                outer,outer_w,outer_h=rasterize_outer_only(loops,scale)
-                if ALLOW_NEST_IN_HOLES:
-                    base_loops = loops
-                    base_mask, base_w, base_h = raw, raw_w, raw_h
-                else:
-                    base_loops = [loops[0]] if loops else []
-                    base_mask, base_w, base_h = outer, outer_w, outer_h
-
-                precise_test = _offset_loops_precise(base_loops, max(0.0, spacing) + safety_units)
-                precise_occ = _offset_loops_precise(base_loops, safety_units)
-                if precise_test is not None and precise_occ is not None:
-                    test,test_w,test_h=rasterize_loops(precise_test, scale)
-                    occ_pad,occ_w,occ_h=rasterize_loops(precise_occ, scale)
-                else:
-                    _warn_precise_offsets_fallback()
-                    test=dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
-                    occ_pad=dilate_mask(base_mask, base_w, base_h, safety_px)
-                    test_w,test_h = base_w, base_h
-                    occ_w,occ_h = base_w, base_h
-                test_segments,_=_mask_segments_and_fills(test)
-                raw_segments,raw_fills=_mask_segments_and_fills(raw)
-                occ_segments,occ_fills=_mask_segments_and_fills(occ_pad)
-                p._cand_cache[key] = {
-                    'loops':loops,
-                    'raw':raw,
-                    'occ':occ_pad,
-                    'test':test,
-                    'pw':test_w,
-                    'ph':test_h,
-                    'test_segments':test_segments,
-                    'raw_segments':raw_segments,
-                    'raw_fills':raw_fills,
-                    'occ_segments':occ_segments,
-                    'occ_fills':occ_fills
-                }
-            cand=p._cand_cache[key]
+            cand=p.ensure_candidate(scale, ang, mirror, spacing_units, spacing_px,
+                                    safety_units, safety_px, ALLOW_NEST_IN_HOLES,
+                                    precise_offsets=precise_offsets)
             if mask_ops:
                 if 'test_tensor' not in cand: cand['test_tensor']=mask_ops.mask_to_tensor(cand['test'])
                 if 'occ_tensor'  not in cand: cand['occ_tensor'] =mask_ops.mask_to_tensor(cand['occ'])
@@ -2065,47 +2123,10 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             sheets_count+=1
             occ_raw,occ_safe,outlist=ensure_sheet()
 
-            ang,mirror=0.0,False; key=(scale,ang,mirror)
-
-            if key not in p._cand_cache:
-                w,h,loops=p.oriented(ang,mirror)
-                raw,raw_w,raw_h=rasterize_loops(loops,scale)
-                outer,outer_w,outer_h=rasterize_outer_only(loops,scale)
-                if ALLOW_NEST_IN_HOLES:
-                    base_loops = loops
-                    base_mask, base_w, base_h = raw, raw_w, raw_h
-                else:
-                    base_loops = [loops[0]] if loops else []
-                    base_mask, base_w, base_h = outer, outer_w, outer_h
-
-                precise_test = _offset_loops_precise(base_loops, max(0.0, spacing) + safety_units)
-                precise_occ = _offset_loops_precise(base_loops, safety_units)
-                if precise_test is not None and precise_occ is not None:
-                    test,test_w,test_h=rasterize_loops(precise_test, scale)
-                    occ_pad,occ_w,occ_h=rasterize_loops(precise_occ, scale)
-                else:
-                    _warn_precise_offsets_fallback()
-                    test=dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
-                    occ_pad=dilate_mask(base_mask, base_w, base_h, safety_px)
-                    test_w,test_h = base_w, base_h
-                    occ_w,occ_h = base_w, base_h
-                test_segments,_=_mask_segments_and_fills(test)
-                raw_segments,raw_fills=_mask_segments_and_fills(raw)
-                occ_segments,occ_fills=_mask_segments_and_fills(occ_pad)
-                p._cand_cache[key] = {
-                    'loops':loops,
-                    'raw':raw,
-                    'occ':occ_pad,
-                    'test':test,
-                    'pw':test_w,
-                    'ph':test_h,
-                    'test_segments':test_segments,
-                    'raw_segments':raw_segments,
-                    'raw_fills':raw_fills,
-                    'occ_segments':occ_segments,
-                    'occ_fills':occ_fills
-                }
-            cand=p._cand_cache[key]
+            ang,mirror=0.0,False
+            cand=p.ensure_candidate(scale, ang, mirror, spacing_units, spacing_px,
+                                    safety_units, safety_px, ALLOW_NEST_IN_HOLES,
+                                    precise_offsets=precise_offsets)
             if mask_ops:
                 if 'raw_tensor' not in cand: cand['raw_tensor']=mask_ops.mask_to_tensor(cand['raw'])
                 if 'occ_tensor' not in cand: cand['occ_tensor']=mask_ops.mask_to_tensor(cand['occ'])
@@ -2114,10 +2135,10 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             else:
                 or_mask_inplace(occ_raw,cand['raw_segments'],cand['raw_fills'],0,0)
                 or_mask_inplace(occ_safe,cand['occ_segments'],cand['occ_fills'],0,0)
-            outlist.append({'sheet':sheets_count,'loops':p._cand_cache[key]['loops']})
+            outlist.append({'sheet':sheets_count,'loops':cand['loops']})
             placed_count+=1
             if event_sink:
-                event_sink("place", {"sheet":sheets_count,"loops":p._cand_cache[key]['loops'],
+                event_sink("place", {"sheet":sheets_count,"loops":cand['loops'],
                                      "part":os.path.basename(p.name),"placed":placed_count,"total":total_parts})
             if progress:
                 progress(f"Forced place on new sheet {sheets_count+1}\nPlaced: {placed_count}/{total_parts}")
@@ -2203,22 +2224,28 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         search_scale = max(6, scale // 2)  # coarse for trials → faster
 
     Wpx=max(1,int(math.ceil(W*scale))); Hpx=max(1,int(math.ceil(H*scale))); sheet_penalty=Wpx*Hpx*1000
-    cache: Dict[Tuple[tuple,int,float], Tuple[List[dict],int,int]] = {}
+    cache: Dict[Tuple[tuple,int,float,bool], Tuple[List[dict],int,int]] = {}
 
     def evaluate(order: List['Part'], allow_progress: bool, prefix: str = "", use_scale: int = search_scale,
-                 spacing_override: Optional[float] = None):
+                 spacing_override: Optional[float] = None,
+                 precise_offsets: Optional[bool] = None):
         eff_spacing = spacing if spacing_override is None else spacing_override
         spacing_tag = round(max(0.0, eff_spacing), 9)
-        key=(_seq_key(order),use_scale,spacing_tag)
+        if precise_offsets is None:
+            precise_flag = (spacing_override is None and use_scale == scale)
+        else:
+            precise_flag = precise_offsets
+        key=(_seq_key(order),use_scale,spacing_tag, precise_flag)
         if key in cache: return cache[key]
-        allow_events = (spacing_override is None) and allow_progress and event_sink is not None
+        allow_events = (spacing_override is None) and allow_progress and event_sink is not None and precise_flag
         res=pack_bitmap_core(order,W,H,eff_spacing,use_scale,
                              progress=(progress if allow_progress else None),
                              progress_total=total_parts if allow_progress else None,
                              progress_prefix=prefix if allow_progress else "",
                              mask_ops=mask_ops,
                              control=control,
-                             event_sink=(event_sink if allow_events else None))
+                             event_sink=(event_sink if allow_events else None),
+                             precise_offsets=precise_flag)
         cache[key]=res; return res
 
     best_result=None; best_order=None
@@ -2240,8 +2267,10 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     for t,(label,start_order) in enumerate(starts):
         if progress: progress(f"{label}placement trial {t+1}/{attempts}…")
         _ = evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n",
-                     use_scale=search_scale, spacing_override=0.0)
-        last_start=evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n", use_scale=search_scale)
+                     use_scale=search_scale, spacing_override=0.0,
+                     precise_offsets=False)
+        last_start=evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n",
+                             use_scale=search_scale, precise_offsets=False)
         if anneal_limit<=0:
             order_after,result_after=start_order,last_start
         else:
@@ -2251,9 +2280,11 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
             else:
                 order_after,_=_anneal_order(start_order,
                     lambda o, allow_progress=False: evaluate(o, allow_progress, prefix=label,
-                                                             use_scale=search_scale, spacing_override=0.0),
+                                                             use_scale=search_scale, spacing_override=0.0,
+                                                             precise_offsets=False),
                     rnd, sheet_penalty, progress=progress, label=label, max_iters=limit, control=control)
-                result_after=evaluate(order_after, allow_progress=False, prefix=label, use_scale=search_scale)
+                result_after=evaluate(order_after, allow_progress=False, prefix=label, use_scale=search_scale,
+                                      precise_offsets=False)
         final = result_after if _result_is_better(result_after,last_start) else last_start
         final_order = order_after if final is result_after else start_order
         if _result_is_better(final,best_result):
@@ -2264,7 +2295,8 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     if best_result is None:
         best_result=last_start; best_order=starts[0][1] if starts else base
     final_order=best_order if best_order is not None else base
-    final_result=evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale)
+    final_result=evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale,
+                          precise_offsets=True)
     return final_result[0], final_result[1]
 
 # ---------- Shelf fallback ----------
