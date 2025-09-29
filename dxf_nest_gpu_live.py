@@ -1186,21 +1186,24 @@ class Part:
 
     def _spacing_signature(self, spacing_units: float, spacing_px: int,
                             safety_units: float, safety_px: int,
-                            allow_holes: bool, precise_offsets: bool) -> Tuple[bool,int,int,float,float,bool]:
+
+                            allow_holes: bool) -> Tuple[bool,int,int,float,float]:
+
         return (
             bool(allow_holes),
             int(spacing_px),
             int(safety_px),
             round(float(max(0.0, spacing_units)), 9),
             round(float(max(0.0, safety_units)), 9),
-            bool(precise_offsets),
+
         )
 
     def ensure_candidate(self, scale: int, theta: float, mirror: bool,
                          spacing_units: float, spacing_px: int,
                          safety_units: float, safety_px: int,
-                         allow_holes: bool,
-                         precise_offsets: bool = True) -> Dict[str, Any]:
+
+                         allow_holes: bool) -> Dict[str, Any]:
+
         if self.outer is None:
             raise ValueError("Cannot build candidate data for empty part")
 
@@ -1228,7 +1231,9 @@ class Part:
 
         spacing_sig = self._spacing_signature(spacing_units, spacing_px,
                                               safety_units, safety_px,
-                                              allow_holes, precise_offsets)
+
+                                              allow_holes)
+
         variant = base['variants'].get(spacing_sig)
         if variant is None:
             if allow_holes:
@@ -1241,17 +1246,15 @@ class Part:
                 base_w, base_h = base['outer_w'], base['outer_h']
 
             spacing_units = max(0.0, spacing_units)
-            precise_test = precise_occ = None
-            if precise_offsets:
-                precise_test = _offset_loops_precise(base_loops, spacing_units + safety_units)
-                precise_occ = _offset_loops_precise(base_loops, safety_units)
 
-            if precise_offsets and precise_test is not None and precise_occ is not None:
+            precise_test = _offset_loops_precise(base_loops, spacing_units + safety_units)
+            precise_occ = _offset_loops_precise(base_loops, safety_units)
+            if precise_test is not None and precise_occ is not None:
                 test, test_w, test_h = rasterize_loops(precise_test, scale)
                 occ_pad, _, _ = rasterize_loops(precise_occ, scale)
             else:
-                if precise_offsets:
-                    _warn_precise_offsets_fallback()
+                _warn_precise_offsets_fallback()
+
                 test = dilate_mask(base_mask, base_w, base_h, spacing_px + safety_px)
                 occ_pad = dilate_mask(base_mask, base_w, base_h, safety_px)
                 test_w, test_h = base_w, base_h
@@ -2080,8 +2083,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
         for ang,mirror in p.candidate_poses():
             check_ctrl()
             cand=p.ensure_candidate(scale, ang, mirror, spacing_units, spacing_px,
-                                    safety_units, safety_px, ALLOW_NEST_IN_HOLES,
-                                    precise_offsets=precise_offsets)
+
             if mask_ops:
                 if 'test_tensor' not in cand: cand['test_tensor']=mask_ops.mask_to_tensor(cand['test'])
                 if 'occ_tensor'  not in cand: cand['occ_tensor'] =mask_ops.mask_to_tensor(cand['occ'])
@@ -2125,8 +2127,9 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
             ang,mirror=0.0,False
             cand=p.ensure_candidate(scale, ang, mirror, spacing_units, spacing_px,
-                                    safety_units, safety_px, ALLOW_NEST_IN_HOLES,
-                                    precise_offsets=precise_offsets)
+
+                                    safety_units, safety_px, ALLOW_NEST_IN_HOLES)
+
             if mask_ops:
                 if 'raw_tensor' not in cand: cand['raw_tensor']=mask_ops.mask_to_tensor(cand['raw'])
                 if 'occ_tensor' not in cand: cand['occ_tensor']=mask_ops.mask_to_tensor(cand['occ'])
